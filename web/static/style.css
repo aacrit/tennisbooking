@@ -105,7 +105,7 @@ body {
 .topbar-right {
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 12px;
 }
 
 .live-status {
@@ -147,6 +147,27 @@ body {
     50% { box-shadow: 0 0 0 6px rgba(52,199,89,0); }
 }
 
+/* ───── Refresh Button ───── */
+.refresh-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    cursor: pointer;
+    transition: all 0.2s var(--ease);
+    color: var(--text-2);
+}
+.refresh-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-1);
+    box-shadow: var(--shadow);
+}
+.refresh-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
 /* Scan button */
 .scan-btn {
     display: flex;
@@ -186,6 +207,11 @@ body {
     letter-spacing: -0.03em;
     color: var(--text-1);
     line-height: 1;
+    transition: transform 0.3s var(--ease), opacity 0.3s var(--ease);
+}
+.summary-count.updating {
+    transform: scale(1.08);
+    opacity: 0.6;
 }
 .summary-label {
     font-size: 14px;
@@ -193,7 +219,7 @@ body {
     margin-top: 4px;
 }
 
-/* ───── 6-Day Calendar ───── */
+/* ───── 6-Day Calendar (3×2 Grid) ───── */
 .calendar-scroll {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
@@ -205,9 +231,9 @@ body {
 
 .calendar-grid {
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
-    gap: 10px;
-    min-width: 600px;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    min-width: 0;
 }
 
 /* Day Card */
@@ -216,10 +242,10 @@ body {
     border-radius: var(--radius-md);
     box-shadow: var(--shadow);
     padding: 16px;
-    min-height: 160px;
+    min-height: 140px;
     display: flex;
     flex-direction: column;
-    transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease);
+    transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease), opacity 0.2s var(--ease);
 }
 .day-card:hover {
     transform: translateY(-2px);
@@ -231,11 +257,29 @@ body {
     box-shadow: 0 0 0 1px var(--weekend-border), 0 2px 8px rgba(0,0,0,0.04);
 }
 
+/* Collapsed empty days */
+.day-card.day-empty {
+    min-height: 0;
+    padding: 12px 16px;
+    opacity: 0.5;
+}
+.day-card.day-empty:hover {
+    opacity: 0.8;
+}
+.day-card.day-empty .day-slots {
+    flex: 0;
+}
+.day-card.day-empty .no-slots {
+    min-height: 28px;
+    font-size: 12px;
+}
+
+/* Day Header */
 .day-header {
     display: flex;
     align-items: baseline;
     gap: 6px;
-    margin-bottom: 14px;
+    margin-bottom: 12px;
     flex-wrap: wrap;
 }
 .day-name {
@@ -247,6 +291,24 @@ body {
     font-size: 13px;
     color: var(--text-2);
 }
+
+/* Day count badge */
+.day-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    background: var(--green);
+    border-radius: 999px;
+    padding: 0 5px;
+    margin-left: auto;
+}
+
+/* Day tags */
 .day-tag {
     font-size: 10px;
     font-weight: 500;
@@ -280,10 +342,13 @@ body {
     background: var(--green-bg);
     border: 1px solid var(--green-border);
     border-radius: var(--radius-sm);
-    transition: background 0.15s var(--ease);
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 0.15s var(--ease), transform 0.15s var(--ease);
 }
 .slot-chip:hover {
-    background: rgba(52,199,89,0.16);
+    background: rgba(52,199,89,0.18);
+    transform: translateX(2px);
 }
 
 .slot-time {
@@ -296,6 +361,19 @@ body {
     color: var(--text-2);
 }
 
+/* Slot arrow (for clickable links) */
+.slot-arrow {
+    margin-left: auto;
+    opacity: 0;
+    transition: opacity 0.15s var(--ease), transform 0.15s var(--ease);
+    color: var(--green);
+    flex-shrink: 0;
+}
+.slot-chip:hover .slot-arrow {
+    opacity: 1;
+    transform: translateX(2px);
+}
+
 .no-slots {
     flex: 1;
     display: flex;
@@ -304,6 +382,58 @@ body {
     font-size: 13px;
     color: var(--text-3);
     min-height: 60px;
+}
+
+/* ───── Skeleton Loading ───── */
+.skeleton-card {
+    background: var(--surface) !important;
+    box-shadow: var(--shadow) !important;
+    padding: 20px 16px !important;
+    min-height: 120px !important;
+    opacity: 1 !important;
+}
+.skeleton-bar {
+    height: 14px;
+    border-radius: 7px;
+    background: linear-gradient(90deg, var(--border) 25%, var(--surface-hover) 50%, var(--border) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s ease-in-out infinite;
+    margin-bottom: 12px;
+    width: 70%;
+}
+.skeleton-bar.short {
+    width: 45%;
+    height: 10px;
+    margin-bottom: 0;
+}
+
+@keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+/* ───── Empty State Hero ───── */
+.empty-hero {
+    grid-column: 1 / -1;
+    text-align: center;
+    padding: 48px 24px;
+    color: var(--text-2);
+}
+.empty-icon {
+    font-size: 36px;
+    margin-bottom: 12px;
+}
+.empty-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-1);
+}
+.empty-body {
+    font-size: 13px;
+    margin-top: 6px;
+    max-width: 320px;
+    margin-inline: auto;
+    line-height: 1.5;
 }
 
 /* ───── Book Now Bar ───── */
@@ -439,8 +569,11 @@ details[open] > .feed-heading .chevron {
         min-width: 0;
     }
     .day-card {
-        min-width: 130px;
+        min-width: 160px;
         flex-shrink: 0;
+    }
+    .day-card.day-empty {
+        min-width: 100px;
     }
     .summary-count { font-size: 40px; }
     .summary { padding: 24px 0 18px; }
@@ -448,5 +581,6 @@ details[open] > .feed-heading .chevron {
 
 @media (max-width: 380px) {
     .status-text { display: none; }
-    .day-card { min-width: 115px; padding: 12px; }
+    .day-card { min-width: 140px; padding: 12px; }
+    .day-card.day-empty { min-width: 90px; }
 }

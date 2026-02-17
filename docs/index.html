@@ -27,6 +27,13 @@
                         <span class="pulse-dot pulse-gray" id="status-dot"></span>
                         <span class="status-text" id="status-text">Loading...</span>
                     </div>
+                    <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()" title="Refresh data">
+                        <svg class="refresh-icon" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                             stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="23 4 23 10 17 10"></polyline>
+                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                        </svg>
+                    </button>
                 </div>
             </div>
         </div>
@@ -39,24 +46,17 @@
             <div class="summary-label" id="summary-label">loading availability...</div>
         </div>
 
-        <!-- 6-Day Calendar -->
+        <!-- 6-Day Calendar (3x2 grid) -->
         <div class="calendar-scroll">
             <div class="calendar-grid" id="calendar-grid">
-                <!-- Populated by JS -->
+                <!-- Skeleton placeholders -->
+                <div class="day-card skeleton-card"><div class="skeleton-bar"></div><div class="skeleton-bar short"></div></div>
+                <div class="day-card skeleton-card"><div class="skeleton-bar"></div><div class="skeleton-bar short"></div></div>
+                <div class="day-card skeleton-card"><div class="skeleton-bar"></div><div class="skeleton-bar short"></div></div>
+                <div class="day-card skeleton-card"><div class="skeleton-bar"></div><div class="skeleton-bar short"></div></div>
+                <div class="day-card skeleton-card"><div class="skeleton-bar"></div><div class="skeleton-bar short"></div></div>
+                <div class="day-card skeleton-card"><div class="skeleton-bar"></div><div class="skeleton-bar short"></div></div>
             </div>
-        </div>
-
-        <!-- Book Now (shown/hidden by JS) -->
-        <div class="book-bar" id="book-bar" style="display:none;">
-            <a href="https://apm.activecommunities.com/chicagoparkdistrict/Reserve_Options"
-               class="book-btn" target="_blank" rel="noopener">
-                Book Now
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-                    <polyline points="15 3 21 3 21 9"></polyline>
-                    <line x1="10" y1="14" x2="21" y2="3"></line>
-                </svg>
-            </a>
         </div>
 
         <!-- Footer -->
@@ -72,45 +72,82 @@
 
     <script>
     (function() {
+        var BOOKING_URL = 'https://apm.activecommunities.com/chicagoparkdistrict/Reserve_Options';
+        var DAY_FULL = { Mon:'Monday', Tue:'Tuesday', Wed:'Wednesday', Thu:'Thursday', Fri:'Friday', Sat:'Saturday', Sun:'Sunday' };
+
         loadStatus();
-        // Re-check every 5 minutes (data changes only when GitHub Actions commits)
         setInterval(loadStatus, 5 * 60 * 1000);
 
         async function loadStatus() {
             try {
-                const resp = await fetch('data/status.json?_=' + Date.now());
+                var resp = await fetch('data/status.json?_=' + Date.now());
                 if (!resp.ok) return;
-                const data = await resp.json();
+                var data = await resp.json();
                 renderCalendar(data.calendar || []);
                 renderCount(data.total_slots || 0);
                 renderStatus(data);
-                renderBookBar(data.total_slots || 0);
             } catch (e) {
                 console.error('Failed to load status:', e);
             }
         }
 
         function renderCalendar(calendar) {
-            const grid = document.getElementById('calendar-grid');
-            if (!calendar.length) {
-                grid.innerHTML = '<div class="no-slots" style="grid-column:1/-1;min-height:120px;">No data yet</div>';
+            var grid = document.getElementById('calendar-grid');
+            var totalSlots = 0;
+            calendar.forEach(function(d) { totalSlots += (d.slots ? d.slots.length : 0); });
+
+            // Empty state: all days booked
+            if (calendar.length > 0 && totalSlots === 0) {
+                grid.innerHTML =
+                    '<div class="empty-hero">' +
+                        '<div class="empty-icon">&#127934;</div>' +
+                        '<div class="empty-title">No courts available</div>' +
+                        '<div class="empty-body">All courts are fully booked for the next 6 days. New slots open at 7 AM CT daily.</div>' +
+                    '</div>';
                 return;
             }
-            grid.innerHTML = calendar.map(function(day) {
-                const weekendClass = day.is_weekend ? ' day-weekend' : '';
-                let slotsHtml;
-                if (day.slots && day.slots.length > 0) {
+
+            // No data yet
+            if (!calendar.length) {
+                grid.innerHTML = '<div class="empty-hero"><div class="empty-title">No data yet</div></div>';
+                return;
+            }
+
+            grid.innerHTML = calendar.map(function(day, i) {
+                var weekendClass = day.is_weekend ? ' day-weekend' : '';
+                var emptyClass = (!day.slots || day.slots.length === 0) ? ' day-empty' : '';
+                var hasSlots = day.slots && day.slots.length > 0;
+
+                // Day tag
+                var tag = '';
+                if (i === 0) {
+                    tag = '<span class="day-tag">Tomorrow</span>';
+                } else if (day.is_weekend) {
+                    tag = '<span class="day-tag day-tag-weekend">' + esc(DAY_FULL[day.day_name] || day.day_name) + '</span>';
+                }
+
+                // Slot count badge
+                var countBadge = hasSlots ? '<span class="day-count">' + day.slots.length + '</span>' : '';
+
+                // Slots
+                var slotsHtml;
+                if (hasSlots) {
                     slotsHtml = day.slots.map(function(s) {
-                        const court = s.court_name ? '<span class="slot-court">' + esc(s.court_name) + '</span>' : '';
-                        return '<div class="slot-chip"><span class="slot-time">' + esc(s.slot_time) + '</span>' + court + '</div>';
+                        var court = s.court_name ? '<span class="slot-court">' + esc(s.court_name) + '</span>' : '';
+                        return '<a class="slot-chip" href="' + BOOKING_URL + '" target="_blank" rel="noopener">' +
+                            '<span class="slot-time">' + esc(s.slot_time) + '</span>' + court +
+                            '<svg class="slot-arrow" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>' +
+                        '</a>';
                     }).join('');
                 } else {
-                    slotsHtml = '<div class="no-slots">No slots</div>';
+                    slotsHtml = '<div class="no-slots">No availability</div>';
                 }
-                return '<div class="day-card' + weekendClass + '">' +
+
+                return '<div class="day-card' + weekendClass + emptyClass + '">' +
                     '<div class="day-header">' +
                         '<span class="day-name">' + esc(day.day_name) + '</span>' +
                         '<span class="day-date">' + esc(day.date_display) + '</span>' +
+                        countBadge + tag +
                     '</div>' +
                     '<div class="day-slots">' + slotsHtml + '</div>' +
                 '</div>';
@@ -118,17 +155,26 @@
         }
 
         function renderCount(total) {
-            document.getElementById('total-count').textContent = total;
+            var el = document.getElementById('total-count');
+            if (el.textContent !== '--' && el.textContent !== String(total)) {
+                el.classList.add('updating');
+                setTimeout(function() {
+                    el.textContent = total;
+                    el.classList.remove('updating');
+                }, 150);
+            } else {
+                el.textContent = total;
+            }
             document.getElementById('summary-label').textContent =
                 (total === 1 ? 'slot' : 'slots') + ' available in the next 6 days';
         }
 
         function renderStatus(data) {
-            const dot = document.getElementById('status-dot');
-            const text = document.getElementById('status-text');
+            var dot = document.getElementById('status-dot');
+            var text = document.getElementById('status-text');
             if (data.last_scan_success === true) {
                 dot.className = 'pulse-dot pulse-green';
-                text.textContent = data.last_scan_time || '';
+                text.textContent = timeAgo(data.last_scan_time || '');
             } else if (data.last_scan_success === false) {
                 dot.className = 'pulse-dot pulse-red';
                 text.textContent = 'Scan failed';
@@ -138,8 +184,17 @@
             }
         }
 
-        function renderBookBar(total) {
-            document.getElementById('book-bar').style.display = total > 0 ? '' : 'none';
+        function timeAgo(dateStr) {
+            if (!dateStr) return '';
+            var clean = dateStr.replace(/ CT$/, '').replace(/ CST$/, '').replace(/ CDT$/, '');
+            var d = new Date(clean);
+            if (isNaN(d.getTime())) return dateStr;
+            var diff = Math.floor((Date.now() - d.getTime()) / 60000);
+            if (diff < 0) return 'just now';
+            if (diff < 1) return 'just now';
+            if (diff < 60) return diff + 'm ago';
+            if (diff < 1440) return Math.floor(diff / 60) + 'h ago';
+            return Math.floor(diff / 1440) + 'd ago';
         }
 
         function esc(str) {
@@ -147,6 +202,19 @@
             el.textContent = str || '';
             return el.innerHTML;
         }
+
+        // Manual refresh
+        window.manualRefresh = async function() {
+            var btn = document.getElementById('refresh-btn');
+            var icon = btn.querySelector('.refresh-icon');
+            btn.disabled = true;
+            icon.style.animation = 'spin 0.6s linear infinite';
+            await loadStatus();
+            setTimeout(function() {
+                icon.style.animation = '';
+                btn.disabled = false;
+            }, 600);
+        };
     })();
     </script>
 </body>

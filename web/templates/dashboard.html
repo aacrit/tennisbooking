@@ -40,53 +40,55 @@
     <div class="summary-label">slot{{ 's' if total_slots != 1 }} available in the next 6 days</div>
 </div>
 
-<!-- 6-Day Calendar -->
+<!-- 6-Day Calendar (3×2 grid) -->
 <div class="calendar-scroll">
-    <div class="calendar-grid">
+    <div class="calendar-grid" id="calendar-grid">
+        {% set ns = namespace(total_slots_count=0) %}
         {% for day in calendar %}
-        <div class="day-card {{ 'day-weekend' if day.is_weekend }}" data-date="{{ day.date }}">
-            <div class="day-header">
-                <span class="day-name">{{ day.day_name }}</span>
-                <span class="day-date">{{ day.date_display }}</span>
-                {% if day.is_tomorrow %}
-                    <span class="day-tag">Tomorrow</span>
-                {% elif day.is_weekend %}
-                    <span class="day-tag day-tag-weekend">{{ day.day_full }}</span>
-                {% endif %}
-            </div>
-            <div class="day-slots">
-                {% if day.slots %}
-                    {% for slot in day.slots %}
-                    <div class="slot-chip">
-                        <span class="slot-time">{{ slot.slot_time }}</span>
-                        {% if slot.court_name %}
-                            <span class="slot-court">{{ slot.court_name }}</span>
-                        {% endif %}
-                    </div>
-                    {% endfor %}
-                {% else %}
-                    <div class="no-slots">No slots</div>
-                {% endif %}
-            </div>
-        </div>
+            {% set ns.total_slots_count = ns.total_slots_count + (day.slots|length) %}
         {% endfor %}
+
+        {% if calendar|length > 0 and ns.total_slots_count == 0 %}
+            <div class="empty-hero">
+                <div class="empty-icon">&#127934;</div>
+                <div class="empty-title">No courts available</div>
+                <div class="empty-body">All courts are fully booked for the next 6 days. New slots open at 7 AM CT daily.</div>
+            </div>
+        {% else %}
+            {% for day in calendar %}
+            <div class="day-card {{ 'day-weekend' if day.is_weekend }}{{ ' day-empty' if not day.slots }}" data-date="{{ day.date }}">
+                <div class="day-header">
+                    <span class="day-name">{{ day.day_name }}</span>
+                    <span class="day-date">{{ day.date_display }}</span>
+                    {% if day.slots %}
+                        <span class="day-count">{{ day.slots|length }}</span>
+                    {% endif %}
+                    {% if day.is_tomorrow %}
+                        <span class="day-tag">Tomorrow</span>
+                    {% elif day.is_weekend %}
+                        <span class="day-tag day-tag-weekend">{{ day.day_full }}</span>
+                    {% endif %}
+                </div>
+                <div class="day-slots">
+                    {% if day.slots %}
+                        {% for slot in day.slots %}
+                        <a class="slot-chip" href="https://apm.activecommunities.com/chicagoparkdistrict/Reserve_Options" target="_blank" rel="noopener">
+                            <span class="slot-time">{{ slot.slot_time }}</span>
+                            {% if slot.court_name %}
+                                <span class="slot-court">{{ slot.court_name }}</span>
+                            {% endif %}
+                            <svg class="slot-arrow" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                        </a>
+                        {% endfor %}
+                    {% else %}
+                        <div class="no-slots">No availability</div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        {% endif %}
     </div>
 </div>
-
-<!-- Book Now -->
-{% if total_slots > 0 %}
-<div class="book-bar">
-    <a href="https://apm.activecommunities.com/chicagoparkdistrict/Reserve_Options"
-       class="book-btn" target="_blank" rel="noopener">
-        Book Now
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-            <polyline points="15 3 21 3 21 9"></polyline>
-            <line x1="10" y1="14" x2="21" y2="3"></line>
-        </svg>
-    </a>
-</div>
-{% endif %}
 
 <!-- Activity Feed -->
 <div class="feed">
@@ -153,14 +155,17 @@
 {% block scripts %}
 <script>
 (function() {
+    var BOOKING_URL = 'https://apm.activecommunities.com/chicagoparkdistrict/Reserve_Options';
+    var DAY_FULL = { Mon:'Monday', Tue:'Tuesday', Wed:'Wednesday', Thu:'Thursday', Fri:'Friday', Sat:'Saturday', Sun:'Sunday' };
+
     // In-place refresh every 30 seconds
     setInterval(refreshStatus, 30000);
 
     async function refreshStatus() {
         try {
-            const resp = await fetch('/api/status');
+            var resp = await fetch('/api/status');
             if (!resp.ok) return;
-            const data = await resp.json();
+            var data = await resp.json();
             updateCalendar(data.calendar);
             updateCount(data.total_slots);
             updateStatus(data);
@@ -170,29 +175,72 @@
     }
 
     function updateCalendar(calendar) {
-        calendar.forEach(day => {
-            const card = document.querySelector(`.day-card[data-date="${day.date}"]`);
-            if (!card) return;
-            const slotsEl = card.querySelector('.day-slots');
-            if (day.slots.length > 0) {
-                slotsEl.innerHTML = day.slots.map(s => {
-                    const court = s.court_name ? `<span class="slot-court">${s.court_name}</span>` : '';
-                    return `<div class="slot-chip"><span class="slot-time">${s.slot_time}</span>${court}</div>`;
+        var grid = document.getElementById('calendar-grid');
+        var totalSlots = 0;
+        calendar.forEach(function(d) { totalSlots += (d.slots ? d.slots.length : 0); });
+
+        if (calendar.length > 0 && totalSlots === 0) {
+            grid.innerHTML =
+                '<div class="empty-hero">' +
+                    '<div class="empty-icon">&#127934;</div>' +
+                    '<div class="empty-title">No courts available</div>' +
+                    '<div class="empty-body">All courts are fully booked for the next 6 days. New slots open at 7 AM CT daily.</div>' +
+                '</div>';
+            return;
+        }
+
+        grid.innerHTML = calendar.map(function(day, i) {
+            var weekendClass = day.is_weekend ? ' day-weekend' : '';
+            var emptyClass = (!day.slots || day.slots.length === 0) ? ' day-empty' : '';
+            var hasSlots = day.slots && day.slots.length > 0;
+
+            var tag = '';
+            if (i === 0) {
+                tag = '<span class="day-tag">Tomorrow</span>';
+            } else if (day.is_weekend) {
+                tag = '<span class="day-tag day-tag-weekend">' + esc(DAY_FULL[day.day_name] || day.day_name) + '</span>';
+            }
+
+            var countBadge = hasSlots ? '<span class="day-count">' + day.slots.length + '</span>' : '';
+
+            var slotsHtml;
+            if (hasSlots) {
+                slotsHtml = day.slots.map(function(s) {
+                    var court = s.court_name ? '<span class="slot-court">' + esc(s.court_name) + '</span>' : '';
+                    return '<a class="slot-chip" href="' + BOOKING_URL + '" target="_blank" rel="noopener">' +
+                        '<span class="slot-time">' + esc(s.slot_time) + '</span>' + court +
+                        '<svg class="slot-arrow" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>' +
+                    '</a>';
                 }).join('');
             } else {
-                slotsEl.innerHTML = '<div class="no-slots">No slots</div>';
+                slotsHtml = '<div class="no-slots">No availability</div>';
             }
-        });
+
+            return '<div class="day-card' + weekendClass + emptyClass + '">' +
+                '<div class="day-header">' +
+                    '<span class="day-name">' + esc(day.day_name) + '</span>' +
+                    '<span class="day-date">' + esc(day.date_display) + '</span>' +
+                    countBadge + tag +
+                '</div>' +
+                '<div class="day-slots">' + slotsHtml + '</div>' +
+            '</div>';
+        }).join('');
     }
 
     function updateCount(total) {
-        const el = document.getElementById('total-count');
-        if (el) el.textContent = total;
+        var el = document.getElementById('total-count');
+        if (el.textContent !== String(total)) {
+            el.classList.add('updating');
+            setTimeout(function() {
+                el.textContent = total;
+                el.classList.remove('updating');
+            }, 150);
+        }
     }
 
     function updateStatus(data) {
-        const dot = document.querySelector('.pulse-dot');
-        const text = document.querySelector('.status-text');
+        var dot = document.querySelector('.pulse-dot');
+        var text = document.querySelector('.status-text');
         if (!dot || !text) return;
         if (data.last_scan_success) {
             dot.className = 'pulse-dot pulse-green';
@@ -203,32 +251,38 @@
         }
     }
 
+    function esc(str) {
+        var el = document.createElement('span');
+        el.textContent = str || '';
+        return el.innerHTML;
+    }
+
     // Scan Now button
     window.triggerScan = async function() {
-        const btn = document.getElementById('scan-btn');
-        const label = btn.querySelector('.scan-label');
-        const icon = btn.querySelector('.scan-icon');
+        var btn = document.getElementById('scan-btn');
+        var label = btn.querySelector('.scan-label');
+        var icon = btn.querySelector('.scan-icon');
         btn.disabled = true;
         label.textContent = 'Scanning';
         icon.style.animation = 'spin 0.8s linear infinite';
         try {
-            const resp = await fetch('/api/scan-now', { method: 'POST' });
-            const data = await resp.json();
+            var resp = await fetch('/api/scan-now', { method: 'POST' });
+            var data = await resp.json();
             if (resp.ok) {
-                label.textContent = `${data.slots_found} found`;
-                setTimeout(() => refreshStatus(), 500);
-                setTimeout(() => {
+                label.textContent = data.slots_found + ' found';
+                setTimeout(function() { refreshStatus(); }, 500);
+                setTimeout(function() {
                     label.textContent = 'Scan Now';
                     icon.style.animation = '';
                     btn.disabled = false;
                 }, 2000);
             } else {
                 label.textContent = 'Error';
-                setTimeout(() => { label.textContent = 'Scan Now'; icon.style.animation = ''; btn.disabled = false; }, 3000);
+                setTimeout(function() { label.textContent = 'Scan Now'; icon.style.animation = ''; btn.disabled = false; }, 3000);
             }
         } catch (e) {
             label.textContent = 'Error';
-            setTimeout(() => { label.textContent = 'Scan Now'; icon.style.animation = ''; btn.disabled = false; }, 3000);
+            setTimeout(function() { label.textContent = 'Scan Now'; icon.style.animation = ''; btn.disabled = false; }, 3000);
         }
     };
 })();

@@ -12,6 +12,12 @@ from config import Settings
 
 logger = logging.getLogger(__name__)
 
+# Only allow McFetridge Tennis courts 1-6 (exclude pickleball, ball machine, etc.)
+ALLOWED_COURTS_RE = re.compile(
+    r'(McFetridge\s+)?Tennis\s+(Ct|Court)\s*0?[1-6]\b',
+    re.IGNORECASE,
+)
+
 
 def parse_time_string(time_str: str) -> time | None:
     """Parse various time formats into a time object."""
@@ -112,6 +118,11 @@ def filter_slots(raw_slots: list[dict], settings: Settings) -> list[dict]:
         is_weekend = day_of_week >= 5
 
         if not is_weekend and slot_time.hour < settings.weekday_earliest_hour:
+            continue
+
+        # Court name filter: only Ct01-Ct06, skip pickleball/ball machine
+        court_name = slot.get("court_name", "").strip()
+        if court_name and not ALLOWED_COURTS_RE.search(court_name):
             continue
 
         # Dedup by (date, time, court_name)

@@ -348,8 +348,10 @@ class AvailabilityChecker:
                         elements.forEach(el => {
                             const text = el.textContent.trim();
                             if (text) {
+                                const parent = el.closest('[class*="facility"], [class*="court"], [class*="resource"], [class*="lane"], [class*="room"]');
                                 results.push({
                                     text: text,
+                                    parentText: parent ? parent.textContent.trim().substring(0, 200) : '',
                                     className: el.className,
                                     tag: el.tagName,
                                     dataAttrs: Object.fromEntries(
@@ -437,11 +439,36 @@ class AvailabilityChecker:
         if any(x in class_name for x in ["unavailable", "booked", "disabled", "closed"]):
             return None
 
-        # Extract court name if present
+        # Extract court name if present — check text, ariaLabel, data-attrs, parentText
         court_name = ""
-        court_match = re.search(r'(court\s*\d+|tennis\s*\d+)', text, re.IGNORECASE)
+        court_re = re.compile(
+            r'((?:McFetridge\s+)?Tennis\s+Ct\s*\d+|Court\s*\d+|Tennis\s+Court\s*\d+|Ct\s*\d+)',
+            re.IGNORECASE,
+        )
+        court_match = court_re.search(text)
         if court_match:
             court_name = court_match.group(1)
+
+        if not court_name:
+            parent_text = el.get("parentText", "")
+            if parent_text:
+                court_match = court_re.search(parent_text)
+                if court_match:
+                    court_name = court_match.group(1)
+
+        if not court_name:
+            aria = el.get("ariaLabel", "")
+            if aria:
+                court_match = court_re.search(aria)
+                if court_match:
+                    court_name = court_match.group(1)
+
+        if not court_name:
+            for attr_val in el.get("dataAttrs", {}).values():
+                court_match = court_re.search(str(attr_val))
+                if court_match:
+                    court_name = court_match.group(1)
+                    break
 
         return {
             "date": target_date.isoformat(),
@@ -460,13 +487,21 @@ class AvailabilityChecker:
             r'(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))\s*[-–]\s*(?:available|open|book)',
             r'(?:available|open)\s*[-–:]\s*(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))',
         ]
+        court_re = re.compile(
+            r'((?:McFetridge\s+)?Tennis\s+Ct\s*\d+|Court\s*\d+|Tennis\s+Court\s*\d+|Ct\s*\d+)',
+            re.IGNORECASE,
+        )
         for pattern in patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            for time_str in matches:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                time_str = match.group(1)
+                # Look for court name near the time match
+                context = text[max(0, match.start() - 100):match.end() + 100]
+                court_match = court_re.search(context)
+                court_name = court_match.group(1) if court_match else ""
                 slots.append({
                     "date": target_date.isoformat(),
                     "time": time_str.strip(),
-                    "court_name": "",
+                    "court_name": court_name,
                     "day_of_week": target_date.strftime("%A"),
                     "duration_minutes": 60,
                     "raw": {"source": "text_extraction", "match": time_str},

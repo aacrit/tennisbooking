@@ -1,7 +1,60 @@
 {
-  "last_scan_time": null,
-  "last_scan_success": null,
-  "slots_found": 0,
-  "calendar": [],
-  "total_slots": 0
+  "last_scan_time": "2026-02-17 11:43:18 CT",
+  "last_scan_success": true,
+  "slots_found": 2,
+  "calendar": [
+    {
+      "date": "2026-02-18",
+      "date_display": "Feb 18",
+      "day_name": "Wed",
+      "is_weekend": false,
+      "slots": []
+    },
+    {
+      "date": "2026-02-19",
+      "date_display": "Feb 19",
+      "day_name": "Thu",
+      "is_weekend": false,
+      "slots": []
+    },
+    {
+      "date": "2026-02-20",
+      "date_display": "Feb 20",
+      "day_name": "Fri",
+      "is_weekend": false,
+      "slots": []
+    },
+    {
+      "date": "2026-02-21",
+      "date_display": "Feb 21",
+      "day_name": "Sat",
+      "is_weekend": true,
+      "slots": [
+        {
+          "slot_time": "08:00 AM",
+          "court_name": ""
+        }
+      ]
+    },
+    {
+      "date": "2026-02-22",
+      "date_display": "Feb 22",
+      "day_name": "Sun",
+      "is_weekend": true,
+      "slots": [
+        {
+          "slot_time": "08:00 AM",
+          "court_name": ""
+        }
+      ]
+    },
+    {
+      "date": "2026-02-23",
+      "date_display": "Feb 23",
+      "day_name": "Mon",
+      "is_weekend": false,
+      "slots": []
+    }
+  ],
+  "total_slots": 2
 }

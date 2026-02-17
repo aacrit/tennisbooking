@@ -18,9 +18,6 @@
     --green-border: rgba(52,199,89,0.2);
     --red: #ff3b30;
     --red-bg: rgba(255,59,48,0.1);
-    --weekend-bg: #f0f1ff;
-    --weekend-border: rgba(99,102,241,0.08);
-
     --radius-sm: 8px;
     --radius-md: 12px;
     --radius-lg: 16px;
@@ -47,8 +44,6 @@
         --green-bg: rgba(52,199,89,0.15);
         --green-border: rgba(52,199,89,0.25);
         --red-bg: rgba(255,59,48,0.15);
-        --weekend-bg: rgba(99,102,241,0.08);
-        --weekend-border: rgba(99,102,241,0.12);
     }
 }
 
@@ -159,11 +154,6 @@ body {
     transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease), opacity 0.2s var(--ease);
 }
 .day-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-hover); }
-.day-weekend {
-    background: var(--weekend-bg);
-    box-shadow: 0 0 0 1px var(--weekend-border), 0 2px 8px rgba(0,0,0,0.04);
-}
-
 /* Collapsed empty days */
 .day-card.day-empty { min-height: 0; padding: 12px 16px; opacity: 0.5; }
 .day-card.day-empty:hover { opacity: 0.8; }
@@ -185,9 +175,6 @@ body {
     font-size: 10px; font-weight: 500; color: var(--text-2);
     background: var(--surface-hover); border: 1px solid var(--border);
     padding: 1px 7px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.04em;
-}
-.day-tag-weekend {
-    color: #6366f1; background: rgba(99,102,241,0.08); border-color: rgba(99,102,241,0.15);
 }
 
 /* Slots */

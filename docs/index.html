@@ -128,15 +128,12 @@
             var prevVisitSlots = getPrevVisitSlots();
 
             grid.innerHTML = calendar.map(function(day, i) {
-                var weekendClass = day.is_weekend ? ' day-weekend' : '';
                 var emptyClass = (!day.slots || day.slots.length === 0) ? ' day-empty' : '';
                 var hasSlots = day.slots && day.slots.length > 0;
 
                 var tag = '';
                 if (i === 0) {
                     tag = '<span class="day-tag">Tomorrow</span>';
-                } else if (day.is_weekend) {
-                    tag = '<span class="day-tag day-tag-weekend">' + esc(DAY_FULL[day.day_name] || day.day_name) + '</span>';
                 }
 
                 var countBadge = hasSlots ? '<span class="day-count">' + day.slots.length + '</span>' : '';
@@ -156,7 +153,7 @@
                     slotsHtml = '<div class="no-slots">No availability</div>';
                 }
 
-                return '<div class="day-card' + weekendClass + emptyClass + '">' +
+                return '<div class="day-card' + emptyClass + '">' +
                     '<div class="day-header">' +
                         '<span class="day-name">' + esc(day.day_name) + '</span>' +
                         '<span class="day-date">' + esc(day.date_display) + '</span>' +

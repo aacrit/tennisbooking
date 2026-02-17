@@ -326,15 +326,11 @@ class AvailabilityChecker:
                 () => {
                     const results = [];
 
-                    // Look for time slot elements (common patterns in booking UIs)
+                    // Look for time slot elements (targeted patterns)
                     const slotSelectors = [
-                        '[class*="slot"]',
                         '[class*="time-slot"]',
                         '[class*="timeslot"]',
-                        '[class*="available"]',
                         '[class*="bookable"]',
-                        '[class*="schedule"] [class*="item"]',
-                        '[class*="calendar"] [class*="event"]',
                         'td[class*="open"]',
                         'td[class*="available"]',
                         '.schedule-cell',
@@ -343,11 +339,14 @@ class AvailabilityChecker:
                         '[data-status="available"]',
                     ];
 
+                    const timePattern = /\d{1,2}:\d{2}\s*(AM|PM)/i;
+
                     for (const selector of slotSelectors) {
                         const elements = document.querySelectorAll(selector);
                         elements.forEach(el => {
                             const text = el.textContent.trim();
-                            if (text) {
+                            // Only capture elements whose text contains a time with AM/PM
+                            if (text && timePattern.test(text)) {
                                 const parent = el.closest('[class*="facility"], [class*="court"], [class*="resource"], [class*="lane"], [class*="room"]');
                                 results.push({
                                     text: text,
@@ -416,16 +415,17 @@ class AvailabilityChecker:
         if not text:
             return None
 
-        # Extract time from text (e.g., "6:00 PM", "18:00", "6pm")
+        # Extract time from text — require full "H:MM AM/PM" format
+        # This prevents matching bare numbers like "8" or timestamps without AM/PM
         time_match = re.search(
-            r'(\d{1,2}):?(\d{2})?\s*(AM|PM|am|pm)?', text
+            r'(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)', text
         )
         if not time_match:
             return None
 
         hour = int(time_match.group(1))
-        minute = int(time_match.group(2) or 0)
-        ampm = (time_match.group(3) or "").upper()
+        minute = int(time_match.group(2))
+        ampm = time_match.group(3).upper()
 
         if ampm == "PM" and hour != 12:
             hour += 12
@@ -439,12 +439,32 @@ class AvailabilityChecker:
         if any(x in class_name for x in ["unavailable", "booked", "disabled", "closed"]):
             return None
 
-        # Extract court name if present — check text, ariaLabel, data-attrs, parentText
-        court_name = ""
+        # Build court name regex early — needed for positive signal check
         court_re = re.compile(
             r'((?:McFetridge\s+)?Tennis\s+Ct\s*\d+|Court\s*\d+|Tennis\s+Court\s*\d+|Ct\s*\d+)',
             re.IGNORECASE,
         )
+
+        # Require positive availability signal — at least one must be true:
+        # 1. Class suggests availability (available, bookable, open, reserv)
+        # 2. Data attribute indicates availability
+        # 3. Court name found in element text or parent text
+        positive_class_signals = ["available", "bookable", "open", "reserv"]
+        has_positive_class = any(s in class_name for s in positive_class_signals)
+        has_positive_data = any(
+            "available" in str(v).lower() or v.lower() == "true"
+            for v in el.get("dataAttrs", {}).values()
+        )
+        has_court_in_text = bool(court_re.search(text))
+        has_court_in_parent = bool(court_re.search(el.get("parentText", "")))
+        has_court_in_aria = bool(court_re.search(el.get("ariaLabel", "")))
+
+        if not (has_positive_class or has_positive_data or has_court_in_text
+                or has_court_in_parent or has_court_in_aria):
+            return None
+
+        # Extract court name from text, parentText, ariaLabel, data-attrs
+        court_name = ""
         court_match = court_re.search(text)
         if court_match:
             court_name = court_match.group(1)
@@ -494,10 +514,14 @@ class AvailabilityChecker:
         for pattern in patterns:
             for match in re.finditer(pattern, text, re.IGNORECASE):
                 time_str = match.group(1)
-                # Look for court name near the time match
-                context = text[max(0, match.start() - 100):match.end() + 100]
+                # Look for court name near the time match (wider context)
+                context = text[max(0, match.start() - 200):match.end() + 200]
                 court_match = court_re.search(context)
-                court_name = court_match.group(1) if court_match else ""
+                # REQUIRE court name for text-extracted results to avoid false positives
+                if not court_match:
+                    logger.debug("Text extraction: skipping time %s (no court name nearby)", time_str)
+                    continue
+                court_name = court_match.group(1)
                 slots.append({
                     "date": target_date.isoformat(),
                     "time": time_str.strip(),

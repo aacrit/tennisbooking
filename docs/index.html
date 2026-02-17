@@ -7,6 +7,7 @@
     <meta name="theme-color" content="#1c1c1e" media="(prefers-color-scheme: dark)">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <link rel="manifest" href="manifest.json">
     <title>McFetridge Tennis</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -27,6 +28,12 @@
                         <span class="pulse-dot pulse-gray" id="status-dot"></span>
                         <span class="status-text" id="status-text">Loading...</span>
                     </div>
+                    <button class="notif-btn" id="notif-btn" onclick="toggleNotifications()" title="Enable notifications">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                            <path d="M13.73 21a2 2 0 01-3.46 0"/>
+                        </svg>
+                    </button>
                     <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()" title="Refresh data">
                         <svg class="refresh-icon" width="14" height="14" viewBox="0 0 24 24" fill="none"
                              stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -59,25 +66,38 @@
             </div>
         </div>
 
+        <!-- Slot Changes -->
+        <div id="changes-container"></div>
+
         <!-- Footer -->
         <div class="page-footer">
             <span>McFetridge Sports Center</span>
             <span class="footer-sep">&middot;</span>
             <span>3843 N California Ave, Chicago</span>
             <br>
-            <span class="footer-refresh">Data updated every ~15 minutes</span>
+            <span class="footer-refresh" id="refresh-countdown">Data updated every ~15 minutes</span>
         </div>
 
     </div>
 
     <script>
     (function() {
-        var BOOKING_URL = 'https://apm.activecommunities.com/chicagoparkdistrict/Reserve_Options';
+        var BOOKING_URL = 'https://anc.apm.activecommunities.com/chicagoparkdistrict/reservation/landing/quick?groupId=1&locale=en-US';
         var DAY_FULL = { Mon:'Monday', Tue:'Tuesday', Wed:'Wednesday', Thu:'Thursday', Fri:'Friday', Sat:'Saturday', Sun:'Sunday' };
+        var REFRESH_INTERVAL = 5 * 60; // seconds
+        var countdown = REFRESH_INTERVAL;
+        var notificationsEnabled = localStorage.getItem('notif_enabled') === 'true';
 
+        // ── Init ──
         loadStatus();
-        setInterval(loadStatus, 5 * 60 * 1000);
+        setInterval(function() { loadStatus(); countdown = REFRESH_INTERVAL; }, REFRESH_INTERVAL * 1000);
+        setInterval(tickCountdown, 1000);
+        updateNotifButton();
+        if (notificationsEnabled && 'serviceWorker' in navigator) {
+            setupServiceWorker();
+        }
 
+        // ── Data Loading ──
         async function loadStatus() {
             try {
                 var resp = await fetch('data/status.json?_=' + Date.now());
@@ -86,11 +106,14 @@
                 renderCalendar(data.calendar || []);
                 renderCount(data.total_slots || 0);
                 renderStatus(data);
+                renderChanges(data.changes || {});
+                checkForegroundNotifications(data);
             } catch (e) {
                 console.error('Failed to load status:', e);
             }
         }
 
+        // ── Calendar Rendering ──
         function renderCalendar(calendar) {
             var grid = document.getElementById('calendar-grid');
             var totalSlots = 0;
@@ -107,18 +130,19 @@
                 return;
             }
 
-            // No data yet
             if (!calendar.length) {
                 grid.innerHTML = '<div class="empty-hero"><div class="empty-title">No data yet</div></div>';
                 return;
             }
+
+            // Load previous visit slots for "NEW" badges
+            var prevVisitSlots = getPrevVisitSlots();
 
             grid.innerHTML = calendar.map(function(day, i) {
                 var weekendClass = day.is_weekend ? ' day-weekend' : '';
                 var emptyClass = (!day.slots || day.slots.length === 0) ? ' day-empty' : '';
                 var hasSlots = day.slots && day.slots.length > 0;
 
-                // Day tag
                 var tag = '';
                 if (i === 0) {
                     tag = '<span class="day-tag">Tomorrow</span>';
@@ -126,16 +150,16 @@
                     tag = '<span class="day-tag day-tag-weekend">' + esc(DAY_FULL[day.day_name] || day.day_name) + '</span>';
                 }
 
-                // Slot count badge
                 var countBadge = hasSlots ? '<span class="day-count">' + day.slots.length + '</span>' : '';
 
-                // Slots
                 var slotsHtml;
                 if (hasSlots) {
                     slotsHtml = day.slots.map(function(s) {
                         var court = s.court_name ? '<span class="slot-court">' + esc(s.court_name) + '</span>' : '';
+                        var slotKey = day.date + '|' + s.slot_time + '|' + (s.court_name || '');
+                        var newBadge = (!prevVisitSlots.has(slotKey)) ? '<span class="slot-new">NEW</span>' : '';
                         return '<a class="slot-chip" href="' + BOOKING_URL + '" target="_blank" rel="noopener">' +
-                            '<span class="slot-time">' + esc(s.slot_time) + '</span>' + court +
+                            '<span class="slot-time">' + esc(s.slot_time) + '</span>' + court + newBadge +
                             '<svg class="slot-arrow" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>' +
                         '</a>';
                     }).join('');
@@ -152,8 +176,12 @@
                     '<div class="day-slots">' + slotsHtml + '</div>' +
                 '</div>';
             }).join('');
+
+            // Save current slots as "previous visit" for next time
+            savePrevVisitSlots(calendar);
         }
 
+        // ── Count with animation ──
         function renderCount(total) {
             var el = document.getElementById('total-count');
             if (el.textContent !== '--' && el.textContent !== String(total)) {
@@ -169,6 +197,7 @@
                 (total === 1 ? 'slot' : 'slots') + ' available in the next 6 days';
         }
 
+        // ── Status ──
         function renderStatus(data) {
             var dot = document.getElementById('status-dot');
             var text = document.getElementById('status-text');
@@ -184,6 +213,166 @@
             }
         }
 
+        // ── Slot Changes ──
+        function renderChanges(changes) {
+            var container = document.getElementById('changes-container');
+            if (!changes || (!changes.opened || !changes.opened.length) && (!changes.closed || !changes.closed.length)) {
+                container.innerHTML = '';
+                return;
+            }
+
+            var html = '<div class="changes-section">';
+            html += '<div class="changes-header">Recent Changes</div>';
+
+            if (changes.opened && changes.opened.length) {
+                html += changes.opened.map(function(c) {
+                    return '<div class="change-row change-opened">' +
+                        '<span class="change-icon">+</span>' +
+                        '<span class="change-detail">' + esc(c.time) + ' ' + esc(c.court_name) + '</span>' +
+                        '<span class="change-date">' + esc(c.date) + '</span>' +
+                    '</div>';
+                }).join('');
+            }
+
+            if (changes.closed && changes.closed.length) {
+                html += changes.closed.map(function(c) {
+                    return '<div class="change-row change-closed">' +
+                        '<span class="change-icon">&minus;</span>' +
+                        '<span class="change-detail">' + esc(c.time) + ' ' + esc(c.court_name) + '</span>' +
+                        '<span class="change-date">' + esc(c.date) + '</span>' +
+                    '</div>';
+                }).join('');
+            }
+
+            html += '</div>';
+            container.innerHTML = html;
+        }
+
+        // ── Countdown Timer ──
+        function tickCountdown() {
+            countdown--;
+            if (countdown < 0) countdown = REFRESH_INTERVAL;
+            var el = document.getElementById('refresh-countdown');
+            if (el) {
+                var m = Math.floor(countdown / 60);
+                var s = countdown % 60;
+                el.textContent = 'Next refresh in ' + m + 'm ' + (s < 10 ? '0' : '') + s + 's';
+            }
+        }
+
+        // ── Notifications ──
+        function checkForegroundNotifications(data) {
+            if (!notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
+
+            var prevJSON = localStorage.getItem('notif_prev_slots');
+            localStorage.setItem('notif_prev_slots', JSON.stringify(data));
+            if (!prevJSON) return;
+
+            var prev;
+            try { prev = JSON.parse(prevJSON); } catch(e) { return; }
+
+            var oldSlots = new Set();
+            (prev.calendar || []).forEach(function(d) {
+                (d.slots || []).forEach(function(s) {
+                    oldSlots.add(d.date + '|' + s.slot_time + '|' + (s.court_name || ''));
+                });
+            });
+
+            var newSlots = [];
+            (data.calendar || []).forEach(function(d) {
+                (d.slots || []).forEach(function(s) {
+                    var key = d.date + '|' + s.slot_time + '|' + (s.court_name || '');
+                    if (!oldSlots.has(key)) {
+                        newSlots.push(d.day_name + ' ' + s.slot_time + (s.court_name ? ' ' + s.court_name : ''));
+                    }
+                });
+            });
+
+            if (newSlots.length > 0) {
+                new Notification('New Tennis Court Available!', {
+                    body: newSlots.join(', '),
+                    tag: 'tennis-new-slot',
+                });
+            }
+        }
+
+        window.toggleNotifications = async function() {
+            if (!('Notification' in window)) {
+                alert('Notifications are not supported in this browser.');
+                return;
+            }
+
+            if (Notification.permission === 'default') {
+                var perm = await Notification.requestPermission();
+                if (perm === 'granted') {
+                    notificationsEnabled = true;
+                    localStorage.setItem('notif_enabled', 'true');
+                    await setupServiceWorker();
+                    updateNotifButton();
+                }
+            } else if (Notification.permission === 'granted') {
+                notificationsEnabled = !notificationsEnabled;
+                localStorage.setItem('notif_enabled', notificationsEnabled ? 'true' : 'false');
+                updateNotifButton();
+            } else {
+                alert('Notifications are blocked. Please enable them in your browser settings.');
+            }
+        };
+
+        function updateNotifButton() {
+            var btn = document.getElementById('notif-btn');
+            if (notificationsEnabled && 'Notification' in window && Notification.permission === 'granted') {
+                btn.classList.add('active');
+                btn.title = 'Notifications enabled';
+            } else {
+                btn.classList.remove('active');
+                btn.title = 'Enable notifications';
+            }
+        }
+
+        async function setupServiceWorker() {
+            if (!('serviceWorker' in navigator)) return;
+            try {
+                var reg = await navigator.serviceWorker.register('sw.js');
+                if ('periodicSync' in reg) {
+                    try {
+                        var status = await navigator.permissions.query({ name: 'periodic-background-sync' });
+                        if (status.state === 'granted') {
+                            await reg.periodicSync.register('check-slots', {
+                                minInterval: 15 * 60 * 1000,
+                            });
+                        }
+                    } catch (e) {
+                        // periodicSync not available
+                    }
+                }
+            } catch (e) {
+                console.warn('SW registration failed:', e);
+            }
+        }
+
+        // ── "NEW" Badge Tracking ──
+        function getPrevVisitSlots() {
+            var raw = localStorage.getItem('prev_visit_slots');
+            if (!raw) return new Set();
+            try {
+                return new Set(JSON.parse(raw));
+            } catch(e) {
+                return new Set();
+            }
+        }
+
+        function savePrevVisitSlots(calendar) {
+            var keys = [];
+            calendar.forEach(function(d) {
+                (d.slots || []).forEach(function(s) {
+                    keys.push(d.date + '|' + s.slot_time + '|' + (s.court_name || ''));
+                });
+            });
+            localStorage.setItem('prev_visit_slots', JSON.stringify(keys));
+        }
+
+        // ── Utilities ──
         function timeAgo(dateStr) {
             if (!dateStr) return '';
             var clean = dateStr.replace(/ CT$/, '').replace(/ CST$/, '').replace(/ CDT$/, '');
@@ -203,13 +392,14 @@
             return el.innerHTML;
         }
 
-        // Manual refresh
+        // ── Manual Refresh ──
         window.manualRefresh = async function() {
             var btn = document.getElementById('refresh-btn');
             var icon = btn.querySelector('.refresh-icon');
             btn.disabled = true;
             icon.style.animation = 'spin 0.6s linear infinite';
             await loadStatus();
+            countdown = REFRESH_INTERVAL;
             setTimeout(function() {
                 icon.style.animation = '';
                 btn.disabled = false;

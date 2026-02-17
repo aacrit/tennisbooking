@@ -1,0 +1,16 @@
+{
+    "name": "McFetridge Tennis",
+    "short_name": "Tennis",
+    "description": "Tennis court availability at McFetridge Sports Center",
+    "start_url": ".",
+    "display": "standalone",
+    "background_color": "#fafafa",
+    "theme_color": "#34c759",
+    "icons": [
+        {
+            "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#127934;</text></svg>",
+            "sizes": "any",
+            "type": "image/svg+xml"
+        }
+    ]
+}

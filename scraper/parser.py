@@ -120,9 +120,15 @@ def filter_slots(raw_slots: list[dict], settings: Settings) -> list[dict]:
         if not is_weekend and slot_time.hour < settings.weekday_earliest_hour:
             continue
 
-        # Court name filter: only Ct01-Ct06, skip pickleball/ball machine
+        # Court name filter: require a valid court name matching Ct01-Ct06
+        # Slots with empty court_name are rejected (prevents false positives
+        # from scraper picking up non-slot DOM elements)
         court_name = slot.get("court_name", "").strip()
-        if court_name and not ALLOWED_COURTS_RE.search(court_name):
+        if not court_name or not ALLOWED_COURTS_RE.search(court_name):
+            logger.debug(
+                "Rejecting slot with missing/invalid court_name: %r (date=%s, time=%s)",
+                court_name, slot.get("date"), slot.get("time"),
+            )
             continue
 
         # Dedup by (date, time, court_name)

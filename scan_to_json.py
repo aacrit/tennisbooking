@@ -56,6 +56,47 @@ def build_calendar(filtered_slots: list[dict]) -> list[dict]:
     return calendar
 
 
+def compute_changes(old_status: dict, new_calendar: list[dict], now_ct: str) -> dict:
+    """Compare previous scan's slots with current to detect opens/closes."""
+    old_set = set()
+    for day in old_status.get("calendar", []):
+        for s in day.get("slots", []):
+            old_set.add((day["date"], s["slot_time"], s.get("court_name", "")))
+
+    new_set = set()
+    for day in new_calendar:
+        for s in day.get("slots", []):
+            new_set.add((day["date"], s["slot_time"], s.get("court_name", "")))
+
+    opened = sorted(
+        [{"date": d, "time": t, "court_name": c, "detected_at": now_ct}
+         for d, t, c in (new_set - old_set)],
+        key=lambda x: (x["date"], x["time"]),
+    )
+    closed = sorted(
+        [{"date": d, "time": t, "court_name": c, "last_seen": old_status.get("last_scan_time", "")}
+         for d, t, c in (old_set - new_set)],
+        key=lambda x: (x["date"], x["time"]),
+    )
+
+    return {
+        "since": old_status.get("last_scan_time", ""),
+        "opened": opened,
+        "closed": closed,
+    }
+
+
+def load_previous_status() -> dict:
+    """Load the previous status.json for change tracking."""
+    if os.path.exists(OUT_PATH):
+        try:
+            with open(OUT_PATH) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
 def write_json(data: dict):
     """Write JSON to docs/data/status.json, creating directories as needed."""
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -68,6 +109,8 @@ async def main():
     settings = Settings()
     logger.info("Starting one-shot availability scan...")
 
+    old_status = load_previous_status()
+
     try:
         checker = AvailabilityChecker(settings)
         raw_slots = await checker.check_availability()
@@ -75,18 +118,21 @@ async def main():
     except Exception as e:
         logger.exception("Scan failed: %s", e)
         now_ct = datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CT")
+        calendar = build_calendar([])
         write_json({
             "last_scan_time": now_ct,
             "last_scan_success": False,
             "slots_found": 0,
-            "calendar": build_calendar([]),
+            "calendar": calendar,
             "total_slots": 0,
+            "changes": compute_changes(old_status, calendar, now_ct),
         })
         sys.exit(1)
 
     now_ct = datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CT")
     calendar = build_calendar(filtered)
     total_slots = sum(len(day["slots"]) for day in calendar)
+    changes = compute_changes(old_status, calendar, now_ct)
 
     write_json({
         "last_scan_time": now_ct,
@@ -94,9 +140,15 @@ async def main():
         "slots_found": len(filtered),
         "calendar": calendar,
         "total_slots": total_slots,
+        "changes": changes,
     })
 
-    logger.info("Done: %d slots across %d days", total_slots, len(calendar))
+    opened_count = len(changes.get("opened", []))
+    closed_count = len(changes.get("closed", []))
+    logger.info(
+        "Done: %d slots across %d days (changes: +%d opened, -%d closed)",
+        total_slots, len(calendar), opened_count, closed_count,
+    )
 
 
 if __name__ == "__main__":

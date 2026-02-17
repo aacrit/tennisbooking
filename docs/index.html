@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#1c1c1e" media="(prefers-color-scheme: dark)">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <title>McFetridge Tennis</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+
+        <!-- Top Bar -->
+        <div class="topbar">
+            <div class="topbar-inner">
+                <div class="topbar-left">
+                    <span class="app-name">McFetridge Tennis</span>
+                </div>
+                <div class="topbar-right">
+                    <div class="live-status">
+                        <span class="pulse-dot pulse-gray" id="status-dot"></span>
+                        <span class="status-text" id="status-text">Loading...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="topbar-spacer"></div>
+
+        <!-- Slot Count Summary -->
+        <div class="summary">
+            <div class="summary-count" id="total-count">--</div>
+            <div class="summary-label" id="summary-label">loading availability...</div>
+        </div>
+
+        <!-- 6-Day Calendar -->
+        <div class="calendar-scroll">
+            <div class="calendar-grid" id="calendar-grid">
+                <!-- Populated by JS -->
+            </div>
+        </div>
+
+        <!-- Book Now (shown/hidden by JS) -->
+        <div class="book-bar" id="book-bar" style="display:none;">
+            <a href="https://apm.activecommunities.com/chicagoparkdistrict/Reserve_Options"
+               class="book-btn" target="_blank" rel="noopener">
+                Book Now
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                    <polyline points="15 3 21 3 21 9"></polyline>
+                    <line x1="10" y1="14" x2="21" y2="3"></line>
+                </svg>
+            </a>
+        </div>
+
+        <!-- Footer -->
+        <div class="page-footer">
+            <span>McFetridge Sports Center</span>
+            <span class="footer-sep">&middot;</span>
+            <span>3843 N California Ave, Chicago</span>
+            <br>
+            <span class="footer-refresh">Data updated every ~15 minutes</span>
+        </div>
+
+    </div>
+
+    <script>
+    (function() {
+        loadStatus();
+        // Re-check every 5 minutes (data changes only when GitHub Actions commits)
+        setInterval(loadStatus, 5 * 60 * 1000);
+
+        async function loadStatus() {
+            try {
+                const resp = await fetch('data/status.json?_=' + Date.now());
+                if (!resp.ok) return;
+                const data = await resp.json();
+                renderCalendar(data.calendar || []);
+                renderCount(data.total_slots || 0);
+                renderStatus(data);
+                renderBookBar(data.total_slots || 0);
+            } catch (e) {
+                console.error('Failed to load status:', e);
+            }
+        }
+
+        function renderCalendar(calendar) {
+            const grid = document.getElementById('calendar-grid');
+            if (!calendar.length) {
+                grid.innerHTML = '<div class="no-slots" style="grid-column:1/-1;min-height:120px;">No data yet</div>';
+                return;
+            }
+            grid.innerHTML = calendar.map(function(day) {
+                const weekendClass = day.is_weekend ? ' day-weekend' : '';
+                let slotsHtml;
+                if (day.slots && day.slots.length > 0) {
+                    slotsHtml = day.slots.map(function(s) {
+                        const court = s.court_name ? '<span class="slot-court">' + esc(s.court_name) + '</span>' : '';
+                        return '<div class="slot-chip"><span class="slot-time">' + esc(s.slot_time) + '</span>' + court + '</div>';
+                    }).join('');
+                } else {
+                    slotsHtml = '<div class="no-slots">No slots</div>';
+                }
+                return '<div class="day-card' + weekendClass + '">' +
+                    '<div class="day-header">' +
+                        '<span class="day-name">' + esc(day.day_name) + '</span>' +
+                        '<span class="day-date">' + esc(day.date_display) + '</span>' +
+                    '</div>' +
+                    '<div class="day-slots">' + slotsHtml + '</div>' +
+                '</div>';
+            }).join('');
+        }
+
+        function renderCount(total) {
+            document.getElementById('total-count').textContent = total;
+            document.getElementById('summary-label').textContent =
+                (total === 1 ? 'slot' : 'slots') + ' available in the next 6 days';
+        }
+
+        function renderStatus(data) {
+            const dot = document.getElementById('status-dot');
+            const text = document.getElementById('status-text');
+            if (data.last_scan_success === true) {
+                dot.className = 'pulse-dot pulse-green';
+                text.textContent = data.last_scan_time || '';
+            } else if (data.last_scan_success === false) {
+                dot.className = 'pulse-dot pulse-red';
+                text.textContent = 'Scan failed';
+            } else {
+                dot.className = 'pulse-dot pulse-gray';
+                text.textContent = 'No data yet';
+            }
+        }
+
+        function renderBookBar(total) {
+            document.getElementById('book-bar').style.display = total > 0 ? '' : 'none';
+        }
+
+        function esc(str) {
+            var el = document.createElement('span');
+            el.textContent = str || '';
+            return el.innerHTML;
+        }
+    })();
+    </script>
+</body>
+</html>

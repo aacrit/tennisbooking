@@ -10,3 +10,6 @@ venv/
 dist/
 build/
 .pytest_cache/
+
+# Ensure GitHub Pages data is tracked
+!docs/data/status.json

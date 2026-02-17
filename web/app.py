@@ -48,7 +48,9 @@ def _build_calendar(grouped_slots: dict) -> list[dict]:
 async def dashboard(request: Request):
     recent_scans = await db.get_recent_scans(limit=5)
     current_slots = await db.get_current_availability()
-    notifications = await db.get_notification_history(limit=3)
+    # [GITHUB-PAGES] Notifications disabled for static deployment
+    # notifications = await db.get_notification_history(limit=3)
+    notifications = []
     last_scan = recent_scans[0] if recent_scans else None
 
     grouped_slots = {}

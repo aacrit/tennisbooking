@@ -16,13 +16,13 @@ class Settings(BaseSettings):
     quiet_start_hour: int = 0           # No scans midnight-6AM
     quiet_end_hour: int = 6
 
-    # Email / SMTP
-    smtp_server: str = "smtp.gmail.com"
-    smtp_port: int = 587
-    smtp_username: str = ""
-    smtp_password: str = ""             # Gmail App Password
-    notify_email: str = "aacritm@gmail.com"
-    from_email: str = ""
+    # [GITHUB-PAGES] Email config disabled for static deployment
+    # smtp_server: str = "smtp.gmail.com"
+    # smtp_port: int = 587
+    # smtp_username: str = ""
+    # smtp_password: str = ""             # Gmail App Password
+    # notify_email: str = "aacritm@gmail.com"
+    # from_email: str = ""
 
     # Time filters
     weekday_earliest_hour: int = 18     # 6 PM for Mon-Fri

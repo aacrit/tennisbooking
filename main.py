@@ -15,7 +15,8 @@ from apscheduler.triggers.cron import CronTrigger
 
 import db
 from config import Settings
-from notifications.emailer import send_availability_email
+# [GITHUB-PAGES] Email notifications disabled for static deployment
+# from notifications.emailer import send_availability_email
 from scraper.checker import AvailabilityChecker
 from scraper.parser import filter_slots
 from web.app import app, set_check_fn
@@ -55,30 +56,30 @@ async def run_check() -> int:
             if filtered:
                 await db.save_slots(scan_id, filtered)
 
-            # Dedup: only notify on slots we haven't already emailed about
-            previously_notified = await db.get_notified_slot_keys()
-            new_slots = []
-            for slot in filtered:
-                key = (slot["date"], slot["time"], slot.get("court_name", ""))
-                if key not in previously_notified:
-                    new_slots.append(slot)
-
-            if new_slots:
-                logger.info("Found %d NEW slots, sending notification", len(new_slots))
-                count = len(new_slots)
-                subject = f"Tennis Court{'s' if count != 1 else ''} Available! ({count} slot{'s' if count != 1 else ''})"
-                success = await send_availability_email(settings, new_slots)
-                await db.record_notification(
-                    settings.notify_email, subject, new_slots, success
-                )
-                if success:
-                    await db.mark_slots_notified(new_slots)
-            else:
-                logger.info("No new slots (found %d total, all previously notified)", len(filtered))
+            # [GITHUB-PAGES] Email notifications disabled for static deployment
+            # previously_notified = await db.get_notified_slot_keys()
+            # new_slots = []
+            # for slot in filtered:
+            #     key = (slot["date"], slot["time"], slot.get("court_name", ""))
+            #     if key not in previously_notified:
+            #         new_slots.append(slot)
+            #
+            # if new_slots:
+            #     logger.info("Found %d NEW slots, sending notification", len(new_slots))
+            #     count = len(new_slots)
+            #     subject = f"Tennis Court{'s' if count != 1 else ''} Available! ({count} slot{'s' if count != 1 else ''})"
+            #     success = await send_availability_email(settings, new_slots)
+            #     await db.record_notification(
+            #         settings.notify_email, subject, new_slots, success
+            #     )
+            #     if success:
+            #         await db.mark_slots_notified(new_slots)
+            # else:
+            #     logger.info("No new slots (found %d total, all previously notified)", len(filtered))
 
             logger.info(
-                "Check complete: %d raw, %d filtered, %d new, %.1fs",
-                len(raw_slots), len(filtered), len(new_slots), duration,
+                "Check complete: %d raw, %d filtered, %.1fs",
+                len(raw_slots), len(filtered), duration,
             )
             return len(filtered)
 

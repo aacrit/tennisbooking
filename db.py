@@ -35,24 +35,25 @@ async def init_db(db_path: str = None):
                 raw_data TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS notifications (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                sent_time TEXT NOT NULL DEFAULT (datetime('now')),
-                recipient TEXT NOT NULL,
-                subject TEXT NOT NULL,
-                slot_count INTEGER NOT NULL,
-                slot_details TEXT NOT NULL,
-                success INTEGER NOT NULL DEFAULT 1,
-                error_message TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS notified_slots (
-                slot_date TEXT NOT NULL,
-                slot_time TEXT NOT NULL,
-                court_name TEXT NOT NULL DEFAULT '',
-                notified_at TEXT NOT NULL DEFAULT (datetime('now')),
-                PRIMARY KEY (slot_date, slot_time, court_name)
-            );
+            -- [GITHUB-PAGES] Notification tables disabled for static deployment
+            -- CREATE TABLE IF NOT EXISTS notifications (
+            --     id INTEGER PRIMARY KEY AUTOINCREMENT,
+            --     sent_time TEXT NOT NULL DEFAULT (datetime('now')),
+            --     recipient TEXT NOT NULL,
+            --     subject TEXT NOT NULL,
+            --     slot_count INTEGER NOT NULL,
+            --     slot_details TEXT NOT NULL,
+            --     success INTEGER NOT NULL DEFAULT 1,
+            --     error_message TEXT
+            -- );
+            --
+            -- CREATE TABLE IF NOT EXISTS notified_slots (
+            --     slot_date TEXT NOT NULL,
+            --     slot_time TEXT NOT NULL,
+            --     court_name TEXT NOT NULL DEFAULT '',
+            --     notified_at TEXT NOT NULL DEFAULT (datetime('now')),
+            --     PRIMARY KEY (slot_date, slot_time, court_name)
+            -- );
         """)
         await db.commit()
 
@@ -94,43 +95,44 @@ async def save_slots(scan_id: int, slots: list[dict]):
         await db.commit()
 
 
-async def get_notified_slot_keys() -> set[tuple]:
-    async with aiosqlite.connect(_db_path) as db:
-        cursor = await db.execute(
-            "SELECT slot_date, slot_time, court_name FROM notified_slots"
-        )
-        rows = await cursor.fetchall()
-        return {(r[0], r[1], r[2]) for r in rows}
-
-
-async def mark_slots_notified(slots: list[dict]):
-    async with aiosqlite.connect(_db_path) as db:
-        for s in slots:
-            await db.execute(
-                "INSERT OR IGNORE INTO notified_slots (slot_date, slot_time, court_name) "
-                "VALUES (?, ?, ?)",
-                (s.get("date", ""), s.get("time", ""), s.get("court_name", "")),
-            )
-        await db.commit()
-
-
-async def record_notification(recipient: str, subject: str,
-                              slots: list[dict], success: bool,
-                              error_message: str | None = None):
-    async with aiosqlite.connect(_db_path) as db:
-        await db.execute(
-            "INSERT INTO notifications (recipient, subject, slot_count, slot_details, success, error_message) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                recipient,
-                subject,
-                len(slots),
-                json.dumps(slots, default=str),
-                int(success),
-                error_message,
-            ),
-        )
-        await db.commit()
+# [GITHUB-PAGES] Notification functions disabled for static deployment
+# async def get_notified_slot_keys() -> set[tuple]:
+#     async with aiosqlite.connect(_db_path) as db:
+#         cursor = await db.execute(
+#             "SELECT slot_date, slot_time, court_name FROM notified_slots"
+#         )
+#         rows = await cursor.fetchall()
+#         return {(r[0], r[1], r[2]) for r in rows}
+#
+#
+# async def mark_slots_notified(slots: list[dict]):
+#     async with aiosqlite.connect(_db_path) as db:
+#         for s in slots:
+#             await db.execute(
+#                 "INSERT OR IGNORE INTO notified_slots (slot_date, slot_time, court_name) "
+#                 "VALUES (?, ?, ?)",
+#                 (s.get("date", ""), s.get("time", ""), s.get("court_name", "")),
+#             )
+#         await db.commit()
+#
+#
+# async def record_notification(recipient: str, subject: str,
+#                               slots: list[dict], success: bool,
+#                               error_message: str | None = None):
+#     async with aiosqlite.connect(_db_path) as db:
+#         await db.execute(
+#             "INSERT INTO notifications (recipient, subject, slot_count, slot_details, success, error_message) "
+#             "VALUES (?, ?, ?, ?, ?, ?)",
+#             (
+#                 recipient,
+#                 subject,
+#                 len(slots),
+#                 json.dumps(slots, default=str),
+#                 int(success),
+#                 error_message,
+#             ),
+#         )
+#         await db.commit()
 
 
 async def get_recent_scans(limit: int = 20) -> list[dict]:
@@ -157,14 +159,15 @@ async def get_current_availability() -> list[dict]:
         return [dict(r) for r in rows]
 
 
-async def get_notification_history(limit: int = 50) -> list[dict]:
-    async with aiosqlite.connect(_db_path) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM notifications ORDER BY id DESC LIMIT ?", (limit,)
-        )
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
+# [GITHUB-PAGES] Notification history disabled for static deployment
+# async def get_notification_history(limit: int = 50) -> list[dict]:
+#     async with aiosqlite.connect(_db_path) as db:
+#         db.row_factory = aiosqlite.Row
+#         cursor = await db.execute(
+#             "SELECT * FROM notifications ORDER BY id DESC LIMIT ?", (limit,)
+#         )
+#         rows = await cursor.fetchall()
+#         return [dict(r) for r in rows]
 
 
 async def cleanup_old_data(days: int = 14):
@@ -174,8 +177,9 @@ async def cleanup_old_data(days: int = 14):
             "DELETE FROM scan_results WHERE scan_time < datetime('now', ?)",
             (f"-{days} days",),
         )
-        await db.execute(
-            "DELETE FROM notified_slots WHERE notified_at < datetime('now', ?)",
-            (f"-{days} days",),
-        )
+        # [GITHUB-PAGES] notified_slots cleanup disabled
+        # await db.execute(
+        #     "DELETE FROM notified_slots WHERE notified_at < datetime('now', ?)",
+        #     (f"-{days} days",),
+        # )
         await db.commit()

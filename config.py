@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     # Scanning schedule (CT timezone)
     peak_interval_minutes: int = 5      # 6:50 AM - 8:00 AM CT
-    normal_interval_minutes: int = 15   # 8:00 AM - 11:59 PM CT
+    normal_interval_minutes: int = 45   # 8:00 AM - 11:59 PM CT
     peak_start_hour: int = 6            # CT
     peak_end_hour: int = 8              # CT
     quiet_start_hour: int = 0           # No scans midnight-6AM

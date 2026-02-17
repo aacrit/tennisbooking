@@ -2,9 +2,9 @@ name: Scan Tennis Courts
 
 on:
   schedule:
-    # Every 15 minutes from 12:00-05:59 UTC (6 AM - midnight CT during CST/UTC-6)
-    # Adjust by -1 hour during CDT (March-November): 11:00-04:59 UTC
-    - cron: '*/15 12-23,0-5 * * *'
+    # Every 45 minutes, 6 AM - midnight CT (12:00-05:59 UTC during CST/UTC-6)
+    # No scanning midnight-6 AM CT. Adjust by -1 hour during CDT.
+    - cron: '0,45 12-23,0-5 * * *'
   workflow_dispatch: # Allow manual trigger from GitHub UI
 
 concurrency:

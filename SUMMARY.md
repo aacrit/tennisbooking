@@ -15,7 +15,7 @@ The Chicago Park District uses a booking website (called ActiveNet) to manage co
 So this system launches an invisible web browser (Playwright/Chromium), visits the booking page, watches the network traffic for availability data, and extracts court times. It does this on a schedule, saves the results to a small JSON file, and a static webpage reads that file to show the dashboard.
 
 ```
-  Every 15 min (GitHub Actions)
+  Every 45 min (GitHub Actions)
          |
          v
   Launch headless browser
@@ -54,7 +54,7 @@ No login, API key, or account is needed. The portal is publicly accessible.
 ## Key Features
 
 - **6-day lookahead** — Shows availability for the next 6 days
-- **Smart scheduling** — Scans every 5 minutes at 7 AM (when new slots drop), every 15 minutes otherwise, stops overnight
+- **Smart scheduling** — Scans every 5 minutes at 7 AM (when new slots drop), every 45 minutes otherwise, stops overnight
 - **Weekday filtering** — Only shows 6 PM+ slots on weekdays (after work hours)
 - **Change tracking** — Shows which slots opened or closed since the last scan
 - **"NEW" badges** — Highlights slots you haven't seen before
@@ -135,7 +135,7 @@ docs/                    GitHub Pages site
   data/status.json       Scraped availability data (auto-updated)
 
 .github/workflows/
-  scan.yml               Scheduled scraper (every 15 min)
+  scan.yml               Scheduled scraper (every 45 min)
 ```
 
 ---
@@ -149,7 +149,7 @@ All settings are environment variables (set in `.env` or GitHub Actions):
 | `WEEKDAY_EARLIEST_HOUR` | 18 (6 PM) | Only show weekday slots at or after this hour |
 | `DAYS_AHEAD` | 6 | How many days to look ahead |
 | `PEAK_INTERVAL_MINUTES` | 5 | Scan frequency during 6:50-8:00 AM CT |
-| `NORMAL_INTERVAL_MINUTES` | 15 | Scan frequency 8:00 AM - midnight CT |
+| `NORMAL_INTERVAL_MINUTES` | 45 | Scan frequency 8:00 AM - midnight CT |
 | `SMTP_USERNAME` | — | Gmail address (for email alerts) |
 | `SMTP_PASSWORD` | — | Gmail App Password (for email alerts) |
 | `DEBUG_HEADED` | false | Show the browser window for debugging |
@@ -161,7 +161,7 @@ All settings are environment variables (set in `.env` or GitHub Actions):
 | Time | Frequency | Reason |
 |------|-----------|--------|
 | 6:50 - 8:00 AM | Every 5 min | New slots drop at 7 AM daily |
-| 8:00 AM - Midnight | Every 15 min | Catch cancellations throughout the day |
+| 8:00 AM - Midnight | Every 45 min | Catch cancellations throughout the day |
 | Midnight - 6:00 AM | No scanning | Nothing changes overnight |
 
 ---
@@ -172,4 +172,4 @@ All settings are environment variables (set in `.env` or GitHub Actions):
 - **Court validation:** Only `Tennis Ct01` through `Tennis Ct06` are accepted. Anything without a valid court name is rejected to prevent false positives.
 - **Notification dedup:** The system tracks `(date, time, court_name)` tuples so you never get duplicate alerts for the same slot. Old entries expire after 14 days.
 - **No API keys needed:** The ActiveNet portal is public. No authentication or rate limiting has been observed.
-- **GitHub Actions limits:** The workflow runs ~96 times/day (every 15 min, 18 hours). Each run uses ~2-3 minutes. Well within the free tier.
+- **GitHub Actions limits:** The workflow runs ~24 times/day (every 45 min, 18 hours). Each run uses ~2-3 minutes. Well within the free tier (~1,800 min/month).

@@ -74,13 +74,13 @@ All settings via environment variables (see `.env.example`):
 | `WEEKDAY_EARLIEST_HOUR` | 18 | Only slots >= this hour on weekdays |
 | `DAYS_AHEAD` | 6 | How many days to look ahead |
 | `PEAK_INTERVAL_MINUTES` | 5 | Scan interval 6:50-8AM CT |
-| `NORMAL_INTERVAL_MINUTES` | 15 | Scan interval 8AM-midnight CT |
+| `NORMAL_INTERVAL_MINUTES` | 45 | Scan interval 8AM-midnight CT |
 | `DEBUG_HEADED` | false | Run browser visibly for debugging |
 
 ## Scan Schedule (Central Time)
 
 - **6:50 AM - 8:00 AM**: Every 5 min (new slots drop at 7 AM)
-- **8:00 AM - 11:59 PM**: Every 15 min (catch cancellations)
+- **8:00 AM - 11:59 PM**: Every 45 min (catch cancellations)
 - **Midnight - 6:00 AM**: No scanning
 
 ## Scraper Notes

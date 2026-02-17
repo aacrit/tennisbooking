@@ -127,7 +127,9 @@ async def main():
             "total_slots": 0,
             "changes": compute_changes(old_status, calendar, now_ct),
         })
-        sys.exit(1)
+        # Don't sys.exit(1) — let the workflow commit the failure status
+        # so the dashboard shows when the last attempt was made
+        return
 
     now_ct = datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CT")
     calendar = build_calendar(filtered)

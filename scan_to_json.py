@@ -145,6 +145,19 @@ async def main():
         "changes": changes,
     })
 
+    # Send WhatsApp notification for newly opened slots
+    opened = changes.get("opened", [])
+    if opened:
+        instance_id = os.environ.get("GREEN_API_INSTANCE_ID", "")
+        api_token = os.environ.get("GREEN_API_TOKEN", "")
+        chat_id = os.environ.get("WHATSAPP_CHAT_ID", "")
+        if instance_id and api_token and chat_id:
+            from notifications.whatsapp import send_whatsapp, format_slots_message
+            msg = format_slots_message(opened)
+            send_whatsapp(instance_id, api_token, chat_id, msg)
+        else:
+            logger.debug("WhatsApp not configured, skipping notification")
+
     opened_count = len(changes.get("opened", []))
     closed_count = len(changes.get("closed", []))
     logger.info(

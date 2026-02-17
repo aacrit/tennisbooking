@@ -1,6 +1,6 @@
 # McFetridge Tennis Court Monitor
 
-Monitors tennis court availability at McFetridge Sports Center (Chicago Park District) and sends email notifications when slots open up.
+Monitors tennis court availability at McFetridge Sports Center (Chicago Park District) and sends WhatsApp notifications when slots open up.
 
 ## Quick Start
 
@@ -21,7 +21,7 @@ open http://localhost:8080
 Single Python process: FastAPI + APScheduler + Playwright (headless Chromium)
 
 ```
-Scheduler → Playwright scraper → Filter slots → Email notifier
+Scheduler → Playwright scraper → Filter slots → WhatsApp notifier (Green API)
                                        ↓
                                    SQLite DB
                                        ↓
@@ -36,7 +36,8 @@ config.py            - Pydantic Settings (all config via env vars / .env)
 db.py                - SQLite schema + async queries (aiosqlite)
 scraper/checker.py   - Playwright browser automation (XHR interception + DOM scraping)
 scraper/parser.py    - Time parsing, slot filtering (weekday 6PM+, weekends all)
-notifications/emailer.py - Gmail SMTP email with HTML templates
+notifications/whatsapp.py - WhatsApp via Green API (free tier)
+notifications/emailer.py - Gmail SMTP email with HTML templates (disabled)
 web/app.py           - FastAPI routes (dashboard, API, scan trigger)
 web/templates/       - Jinja2 HTML templates
 web/static/          - CSS
@@ -67,10 +68,9 @@ All settings via environment variables (see `.env.example`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SMTP_USERNAME` | (required) | Gmail address |
-| `SMTP_PASSWORD` | (required) | Gmail App Password |
-| `FROM_EMAIL` | (required) | Sender email |
-| `NOTIFY_EMAIL` | aacritm@gmail.com | Notification recipient |
+| `GREEN_API_INSTANCE_ID` | — | Green API instance ID |
+| `GREEN_API_TOKEN` | — | Green API token |
+| `WHATSAPP_CHAT_ID` | — | Recipient phone as `1XXXXXXXXXX@c.us` |
 | `WEEKDAY_EARLIEST_HOUR` | 18 | Only slots >= this hour on weekdays |
 | `DAYS_AHEAD` | 6 | How many days to look ahead |
 | `PEAK_INTERVAL_MINUTES` | 5 | Scan interval 6:50-8AM CT |
@@ -92,6 +92,8 @@ The booking portal (ActiveNet by ACTIVE Network) is a React SPA with no public A
 
 If the scraper stops finding data (site changed), check `scraper/checker.py` selectors. Run with `DEBUG_HEADED=true` to see the browser in action.
 
-## Notification Dedup
+## WhatsApp Notifications
 
-The `notified_slots` table tracks `(date, time, court_name)` tuples. Only NEW slots trigger emails. Old entries are cleaned up after 14 days.
+Uses Green API (green-api.com) free Developer plan to send WhatsApp messages when new slots open. Only `changes.opened` slots (new since last scan) trigger a message. No database needed — dedup is handled by the scan-to-scan diff in `scan_to_json.py`.
+
+Setup: Sign up at green-api.com, create a free instance, scan QR to link WhatsApp, then set `GREEN_API_INSTANCE_ID`, `GREEN_API_TOKEN`, and `WHATSAPP_CHAT_ID` as GitHub Actions secrets.

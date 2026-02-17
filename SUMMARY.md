@@ -2,7 +2,7 @@
 
 ## What It Does
 
-Automatically checks McFetridge Sports Center's online booking portal for available tennis courts and shows them on a live dashboard. Optionally sends email alerts when new slots open up.
+Automatically checks McFetridge Sports Center's online booking portal for available tennis courts and shows them on a live dashboard. Sends WhatsApp notifications when new slots open up.
 
 **Live dashboard:** https://aacrit.github.io/tennisbooking/
 
@@ -31,9 +31,10 @@ So this system launches an invisible web browser (Playwright/Chromium), visits t
          |
          v
   Save to docs/data/status.json  -->  Git commit + push
-         |
-         v
-  GitHub Pages serves updated dashboard
+         |                                    |
+         v                                    v
+  GitHub Pages serves updated dashboard   WhatsApp notification
+                                          (if new slots opened)
 ```
 
 ---
@@ -58,6 +59,7 @@ No login, API key, or account is needed. The portal is publicly accessible.
 - **Weekday filtering** — Only shows 6 PM+ slots on weekdays (after work hours)
 - **Change tracking** — Shows which slots opened or closed since the last scan
 - **"NEW" badges** — Highlights slots you haven't seen before
+- **WhatsApp alerts** — Sends a WhatsApp message when new slots open (via Green API)
 - **Browser notifications** — Optional alerts when new slots appear
 - **Mobile-friendly** — Responsive grid layout, works as a home screen app
 - **Dark mode** — Follows your system preference
@@ -71,7 +73,7 @@ No login, API key, or account is needed. The portal is publicly accessible.
 | **GitHub Actions** | Runs the scraper on a schedule | Free (2,000 min/month for public repos) |
 | **GitHub Pages** | Hosts the dashboard website | Free |
 | **Playwright + Chromium** | Headless browser for scraping | Free (open source) |
-| **Gmail SMTP** | Email alerts (currently disabled) | Free |
+| **Green API** | WhatsApp notifications (free Developer plan) | Free |
 | **Fly.io** (optional) | Self-hosted deployment alternative | ~$5-10/month |
 
 **Total running cost: $0** (current GitHub-based setup)
@@ -87,12 +89,13 @@ GitHub Actions (cron)
     └── scan_to_json.py
           ├── Playwright browser → visits ActiveNet portal
           ├── Extracts + filters available slots
-          └── Writes docs/data/status.json
-                └── Git commit → GitHub Pages auto-deploys
-                      └── Static dashboard (vanilla HTML/JS/CSS)
+          ├── Writes docs/data/status.json
+          │     └── Git commit → GitHub Pages auto-deploys
+          │           └── Static dashboard (vanilla HTML/JS/CSS)
+          └── WhatsApp notification via Green API (if new slots opened)
 ```
 
-Single file output. No server, no database, no backend.
+Single file output + WhatsApp alerts. No server, no database, no backend.
 
 ### Self-Hosted Mode (Docker / Fly.io)
 
@@ -122,7 +125,8 @@ scraper/
   parser.py              Time parsing, slot filtering, court validation
 
 notifications/
-  emailer.py             Gmail SMTP with HTML email templates
+  whatsapp.py            WhatsApp via Green API (free tier)
+  emailer.py             Gmail SMTP with HTML email templates (disabled)
 
 web/
   app.py                 FastAPI routes (self-hosted dashboard)
@@ -150,8 +154,9 @@ All settings are environment variables (set in `.env` or GitHub Actions):
 | `DAYS_AHEAD` | 6 | How many days to look ahead |
 | `PEAK_INTERVAL_MINUTES` | 5 | Scan frequency during 6:50-8:00 AM CT |
 | `NORMAL_INTERVAL_MINUTES` | 45 | Scan frequency 8:00 AM - midnight CT |
-| `SMTP_USERNAME` | — | Gmail address (for email alerts) |
-| `SMTP_PASSWORD` | — | Gmail App Password (for email alerts) |
+| `GREEN_API_INSTANCE_ID` | — | Green API instance ID (for WhatsApp) |
+| `GREEN_API_TOKEN` | — | Green API token (for WhatsApp) |
+| `WHATSAPP_CHAT_ID` | — | Recipient phone as `1XXXXXXXXXX@c.us` |
 | `DEBUG_HEADED` | false | Show the browser window for debugging |
 
 ---
@@ -170,6 +175,6 @@ All settings are environment variables (set in `.env` or GitHub Actions):
 
 - **If the scraper stops finding data:** The ActiveNet portal may have changed its HTML structure. Run with `DEBUG_HEADED=true` to see what the browser sees. Check `scraper/checker.py` selectors.
 - **Court validation:** Only `Tennis Ct01` through `Tennis Ct06` are accepted. Anything without a valid court name is rejected to prevent false positives.
-- **Notification dedup:** The system tracks `(date, time, court_name)` tuples so you never get duplicate alerts for the same slot. Old entries expire after 14 days.
+- **WhatsApp notifications:** Uses Green API (green-api.com) free Developer plan. Only sends when `changes.opened` is non-empty (new slots since last scan). Dedup is handled by the scan-to-scan diff — no database needed.
 - **No API keys needed:** The ActiveNet portal is public. No authentication or rate limiting has been observed.
 - **GitHub Actions limits:** The workflow runs ~24 times/day (every 45 min, 18 hours). Each run uses ~2-3 minutes. Well within the free tier (~1,800 min/month).

@@ -40,6 +40,9 @@ jobs:
         env:
           WEEKDAY_EARLIEST_HOUR: '18'
           DAYS_AHEAD: '6'
+          GREEN_API_INSTANCE_ID: ${{ secrets.GREEN_API_INSTANCE_ID }}
+          GREEN_API_TOKEN: ${{ secrets.GREEN_API_TOKEN }}
+          WHATSAPP_CHAT_ID: ${{ secrets.WHATSAPP_CHAT_ID }}
 
       - name: Commit and push if changed
         run: |

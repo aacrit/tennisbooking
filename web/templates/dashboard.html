@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% block content %}
+
+<!-- Status Banner -->
+<div class="status-banner {% if last_scan and last_scan.success %}status-ok{% else %}status-error{% endif %}">
+    {% if last_scan %}
+        <div class="status-indicator">
+            <span class="dot {% if last_scan.success %}dot-green{% else %}dot-red{% endif %}"></span>
+            <span>Last scan: {{ last_scan.scan_time }} &bull;
+                {% if last_scan.success %}
+                    {{ last_scan.slots_found }} slot{{ 's' if last_scan.slots_found != 1 }} found
+                {% else %}
+                    Scan failed
+                {% endif %}
+                &bull; {{ "%.1f"|format(last_scan.duration_seconds or 0) }}s
+            </span>
+        </div>
+    {% else %}
+        <div class="status-indicator">
+            <span class="dot dot-gray"></span>
+            <span>No scans yet</span>
+        </div>
+    {% endif %}
+    <button id="scan-now-btn" class="btn btn-sm" onclick="triggerScan()">Scan Now</button>
+</div>
+
+<!-- Available Slots -->
+<section class="card">
+    <h2>Available Slots
+        {% if total_slots > 0 %}
+            <span class="badge badge-green">{{ total_slots }}</span>
+        {% else %}
+            <span class="badge badge-gray">None</span>
+        {% endif %}
+    </h2>
+
+    {% if grouped_slots %}
+        {% for date_str, slots in grouped_slots|dictsort %}
+            <div class="date-group">
+                <h3>
+                    {{ slots[0].day_of_week }}, {{ date_str }}
+                    {% if slots[0].day_of_week in ['Saturday', 'Sunday'] %}
+                        <span class="badge badge-blue">Weekend</span>
+                    {% endif %}
+                </h3>
+                <div class="slot-grid">
+                    {% for slot in slots %}
+                        <div class="slot-card">
+                            <span class="slot-time">{{ slot.slot_time }}</span>
+                            {% if slot.court_name %}
+                                <span class="slot-court">{{ slot.court_name }}</span>
+                            {% endif %}
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+        {% endfor %}
+        <div class="book-cta">
+            <a href="https://apm.activecommunities.com/chicagoparkdistrict/Reserve_Options"
+               class="btn btn-primary" target="_blank" rel="noopener">
+                Book Now &rarr;
+            </a>
+        </div>
+    {% else %}
+        <div class="empty-state">
+            <p>No available slots matching your preferences right now.</p>
+            <p class="text-muted">Checking every 5-15 minutes. You'll get an email when slots open up.</p>
+        </div>
+    {% endif %}
+</section>
+
+<!-- Scan History -->
+<section class="card">
+    <h2>Recent Scans</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Status</th>
+                    <th>Slots</th>
+                    <th>Duration</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for scan in recent_scans %}
+                <tr>
+                    <td>{{ scan.scan_time }}</td>
+                    <td>
+                        {% if scan.success %}
+                            <span class="dot dot-green"></span> OK
+                        {% else %}
+                            <span class="dot dot-red"></span> Failed
+                        {% endif %}
+                    </td>
+                    <td>{{ scan.slots_found }}</td>
+                    <td>{{ "%.1f"|format(scan.duration_seconds or 0) }}s</td>
+                </tr>
+                {% endfor %}
+                {% if not recent_scans %}
+                <tr><td colspan="4" class="text-muted">No scans yet</td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- Notification History -->
+<section class="card">
+    <h2>Notifications Sent</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Subject</th>
+                    <th>Slots</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for notif in notifications %}
+                <tr>
+                    <td>{{ notif.sent_time }}</td>
+                    <td>{{ notif.subject }}</td>
+                    <td>{{ notif.slot_count }}</td>
+                    <td>
+                        {% if notif.success %}
+                            <span class="dot dot-green"></span> Sent
+                        {% else %}
+                            <span class="dot dot-red"></span> Failed
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+                {% if not notifications %}
+                <tr><td colspan="4" class="text-muted">No notifications yet</td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<p class="text-muted text-center" id="auto-refresh-note">
+    Auto-refreshing every 60s &bull; {{ now }}
+</p>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Auto-refresh status every 60 seconds
+    setInterval(async () => {
+        try {
+            const resp = await fetch('/api/status');
+            if (resp.ok) {
+                // Reload the page to update all sections
+                window.location.reload();
+            }
+        } catch (e) {
+            console.error('Auto-refresh failed:', e);
+        }
+    }, 60000);
+
+    async function triggerScan() {
+        const btn = document.getElementById('scan-now-btn');
+        btn.disabled = true;
+        btn.textContent = 'Scanning...';
+        try {
+            const resp = await fetch('/api/scan-now', { method: 'POST' });
+            const data = await resp.json();
+            if (resp.ok) {
+                btn.textContent = `Done (${data.slots_found} slots)`;
+                setTimeout(() => window.location.reload(), 1500);
+            } else {
+                btn.textContent = 'Error';
+                setTimeout(() => { btn.textContent = 'Scan Now'; btn.disabled = false; }, 3000);
+            }
+        } catch (e) {
+            btn.textContent = 'Error';
+            setTimeout(() => { btn.textContent = 'Scan Now'; btn.disabled = false; }, 3000);
+        }
+    }
+</script>
+{% endblock %}

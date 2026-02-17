@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tennis Court Monitor - McFetridge</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>McFetridge Tennis Monitor</h1>
+            <p class="subtitle">Checking for available court time</p>
+        </div>
+    </header>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    <footer>
+        <div class="container">
+            <p>McFetridge Sports Center &bull; 3843 N. California Ave, Chicago</p>
+        </div>
+    </footer>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

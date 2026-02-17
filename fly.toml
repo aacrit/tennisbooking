@@ -1,0 +1,24 @@
+# Fly.io deployment config
+# Deploy with: fly launch --no-deploy && fly secrets set ... && fly deploy
+
+app = "mcfetridge-tennis-monitor"
+primary_region = "ord"  # Chicago (closest to McFetridge)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false   # Keep running for scheduled scans
+  auto_start_machines = true
+  min_machines_running = 1
+
+[mounts]
+  source = "tennis_data"
+  destination = "/app/data"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

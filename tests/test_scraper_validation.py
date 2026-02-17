@@ -395,3 +395,188 @@ class TestDomAcceptsValidSlot:
         result = checker._parse_dom_element(el, target)
         assert result is not None, "Slot with court in aria-label should be accepted"
         assert result["court_name"] == "Tennis Ct02"
+
+
+# ===========================================================================
+# Tests 13-16: DOM rejects empty court_name (Fix 1)
+# ===========================================================================
+
+class TestDomRejectsEmptyCourtName:
+    """_parse_dom_element must return None when no court_name can be extracted,
+    even if other positive signals are present."""
+
+    def test_empty_court_positive_class(self):
+        """Element with class 'open' but no court anywhere → None."""
+        checker = AvailabilityChecker(Settings())
+        el = {
+            "text": "8:00 AM",
+            "className": "time-slot open",
+            "parentText": "",
+            "dataAttrs": {},
+            "ariaLabel": "",
+        }
+        result = checker._parse_dom_element(el, date.today() + timedelta(days=1))
+        assert result is None, "No court_name → must be rejected even with positive class"
+
+    def test_empty_court_positive_data_attr(self):
+        """Element with data-status='available' but no court → None."""
+        checker = AvailabilityChecker(Settings())
+        el = {
+            "text": "8:00 AM",
+            "className": "cell",
+            "parentText": "",
+            "dataAttrs": {"data-status": "available"},
+            "ariaLabel": "",
+        }
+        result = checker._parse_dom_element(el, date.today() + timedelta(days=1))
+        assert result is None, "No court_name → must be rejected even with positive data attr"
+
+    def test_valid_court_in_text_accepted(self):
+        """Court name in element text → accepted."""
+        checker = AvailabilityChecker(Settings())
+        el = {
+            "text": "Tennis Ct 1 8:00 AM",
+            "className": "available",
+            "parentText": "",
+            "dataAttrs": {},
+            "ariaLabel": "",
+        }
+        result = checker._parse_dom_element(el, date.today() + timedelta(days=1))
+        assert result is not None, "Court in text should be accepted"
+        assert "Tennis Ct" in result["court_name"]
+
+    def test_valid_court_in_parent_with_signal(self):
+        """Court in parentText + availability class → accepted."""
+        checker = AvailabilityChecker(Settings())
+        el = {
+            "text": "8:00 AM",
+            "className": "time-slot available",
+            "parentText": "McFetridge Tennis Ct 3 Schedule",
+            "dataAttrs": {},
+            "ariaLabel": "",
+        }
+        result = checker._parse_dom_element(el, date.today() + timedelta(days=1))
+        assert result is not None, "Court in parent + available class should be accepted"
+        assert "Tennis Ct" in result["court_name"]
+
+
+# ===========================================================================
+# Tests 17-19: Positive signal requires court (Fix 3)
+# ===========================================================================
+
+class TestDomPositiveSignalRequiresCourt:
+    """Positive class/data signals alone are NOT enough — court must be present."""
+
+    def test_class_open_no_court_rejected(self):
+        """Generic 'open' class with no court context → rejected."""
+        checker = AvailabilityChecker(Settings())
+        el = {
+            "text": "8:00 AM",
+            "className": "dropdown-open",
+            "parentText": "Select a time",
+            "dataAttrs": {},
+            "ariaLabel": "",
+        }
+        result = checker._parse_dom_element(el, date.today() + timedelta(days=1))
+        assert result is None, "Class 'open' without court context should be rejected"
+
+    def test_class_available_with_court_in_parent(self):
+        """Available class + court in parent → accepted."""
+        checker = AvailabilityChecker(Settings())
+        el = {
+            "text": "9:00 AM",
+            "className": "slot available",
+            "parentText": "Ct 2 availability",
+            "dataAttrs": {},
+            "ariaLabel": "",
+        }
+        result = checker._parse_dom_element(el, date.today() + timedelta(days=1))
+        assert result is not None, "Available class + court in parent should be accepted"
+
+    def test_court_in_text_no_class_signal(self):
+        """Court name directly in element text → accepted even without class signal."""
+        checker = AvailabilityChecker(Settings())
+        el = {
+            "text": "Tennis Ct03 6:30 PM",
+            "className": "cell",
+            "parentText": "",
+            "dataAttrs": {},
+            "ariaLabel": "",
+        }
+        result = checker._parse_dom_element(el, date.today() + timedelta(days=1))
+        assert result is not None, "Court in text should be accepted without class signal"
+        assert result["court_name"] == "Tennis Ct03"
+
+
+# ===========================================================================
+# Tests 20-21: API response parser rejects empty court_name (Fix 4)
+# ===========================================================================
+
+class TestApiResponseRejectsEmptyCourtName:
+    """_parse_captured_responses must skip items with empty court_name."""
+
+    def test_api_empty_court_skipped(self):
+        checker = AvailabilityChecker(Settings())
+        checker.captured_responses = [{
+            "url": "https://example.com/api/availability",
+            "data": {
+                "items": [
+                    {"time": "08:00", "date": "2026-02-21", "court": "", "available": True},
+                ]
+            },
+        }]
+        result = checker._parse_captured_responses()
+        assert len(result) == 0, "API item with empty court should be skipped"
+
+    def test_api_valid_court_kept(self):
+        checker = AvailabilityChecker(Settings())
+        checker.captured_responses = [{
+            "url": "https://example.com/api/availability",
+            "data": {
+                "items": [
+                    {"time": "08:00", "date": "2026-02-21", "facility": "Tennis Ct 5", "available": True},
+                ]
+            },
+        }]
+        result = checker._parse_captured_responses()
+        assert len(result) == 1, "API item with valid court should be kept"
+        assert result[0]["court_name"] == "Tennis Ct 5"
+
+
+# ===========================================================================
+# Tests 22-23: End-to-end integration (no empty courts in output)
+# ===========================================================================
+
+class TestEndToEndNoEmptyCourts:
+    """Verify the full pipeline never outputs empty court_name slots."""
+
+    def test_filter_rejects_checker_empty_court(self):
+        """A slot from checker with court_name='' should be rejected by filter_slots."""
+        raw = [_make_slot(
+            _next_weekday(5).isoformat(),  # Saturday
+            "8:00 AM",
+            court_name="",
+        )]
+        result = filter_slots(raw, _settings())
+        assert len(result) == 0, "Empty court_name must be rejected at filter level"
+
+    def test_build_calendar_no_empty_courts(self):
+        """build_calendar output should never contain empty court_name when fed filtered data."""
+        from scan_to_json import build_calendar
+
+        # Feed only valid filtered data
+        next_sat = _next_weekday(5)
+        filtered = [{
+            "date": next_sat.isoformat(),
+            "time": "06:00 AM",
+            "time_24h": "06:00",
+            "court_name": "Tennis Ct01",
+            "day_of_week": "Saturday",
+            "is_weekend": True,
+            "duration_minutes": 60,
+        }]
+        calendar = build_calendar(filtered)
+        for day in calendar:
+            for slot in day.get("slots", []):
+                assert slot["court_name"] != "", \
+                    f"Found empty court_name in calendar output for {day['date']}"

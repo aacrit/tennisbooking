@@ -364,27 +364,6 @@ class AvailabilityChecker:
                         });
                     }
 
-                    // Also look for any table rows that might contain time information
-                    const tables = document.querySelectorAll('table');
-                    tables.forEach(table => {
-                        const rows = table.querySelectorAll('tr');
-                        rows.forEach(row => {
-                            const text = row.textContent.trim();
-                            // Look for time patterns like "6:00 PM", "18:00", etc.
-                            if (/\\d{1,2}:\\d{2}/.test(text)) {
-                                const cells = Array.from(row.querySelectorAll('td, th'));
-                                results.push({
-                                    text: text,
-                                    cells: cells.map(c => c.textContent.trim()),
-                                    className: row.className,
-                                    tag: 'TR',
-                                    dataAttrs: {},
-                                    ariaLabel: '',
-                                });
-                            }
-                        });
-                    });
-
                     return results;
                 }
             """)
@@ -459,8 +438,15 @@ class AvailabilityChecker:
         has_court_in_parent = bool(court_re.search(el.get("parentText", "")))
         has_court_in_aria = bool(court_re.search(el.get("ariaLabel", "")))
 
-        if not (has_positive_class or has_positive_data or has_court_in_text
-                or has_court_in_parent or has_court_in_aria):
+        has_court_anywhere = has_court_in_text or has_court_in_parent or has_court_in_aria
+        has_availability_signal = has_positive_class or has_positive_data
+
+        # Must have court context — no court association = not a bookable slot
+        if not has_court_anywhere:
+            return None
+        # If court is only in parent (not in element text or aria), also require
+        # a positive availability signal to avoid matching navigation/headers
+        if not has_court_in_text and not has_court_in_aria and not has_availability_signal:
             return None
 
         # Extract court name from text, parentText, ariaLabel, data-attrs
@@ -489,6 +475,14 @@ class AvailabilityChecker:
                 if court_match:
                     court_name = court_match.group(1)
                     break
+
+        # Reject elements where no court name could be extracted
+        if not court_name:
+            logger.debug(
+                "DOM element rejected: no court_name found (time=%s, class=%s)",
+                time_str, el.get("className", ""),
+            )
+            return None
 
         return {
             "date": target_date.isoformat(),
@@ -592,13 +586,18 @@ class AvailabilityChecker:
                 )
                 available = item.get("available", item.get("isAvailable", True))
 
+                court_name_val = str(
+                    item.get("facility", item.get("court", item.get("name", "")))
+                ).strip()
+                # Skip API items without court identification
+                if not court_name_val:
+                    continue
+
                 if time_val and available:
                     slots.append({
                         "date": str(date_val),
                         "time": str(time_val),
-                        "court_name": str(
-                            item.get("facility", item.get("court", item.get("name", "")))
-                        ),
+                        "court_name": court_name_val,
                         "day_of_week": "",
                         "duration_minutes": item.get("duration", 60),
                         "raw": item,

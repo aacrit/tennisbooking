@@ -1,185 +1,235 @@
 {% extends "base.html" %}
 {% block content %}
 
-<!-- Status Banner -->
-<div class="status-banner {% if last_scan and last_scan.success %}status-ok{% else %}status-error{% endif %}">
-    {% if last_scan %}
-        <div class="status-indicator">
-            <span class="dot {% if last_scan.success %}dot-green{% else %}dot-red{% endif %}"></span>
-            <span>Last scan: {{ last_scan.scan_time }} &bull;
-                {% if last_scan.success %}
-                    {{ last_scan.slots_found }} slot{{ 's' if last_scan.slots_found != 1 }} found
+<!-- Top Bar -->
+<div class="topbar">
+    <div class="topbar-inner">
+        <div class="topbar-left">
+            <span class="app-name">McFetridge Tennis</span>
+        </div>
+        <div class="topbar-right">
+            <div class="live-status">
+                {% if last_scan and last_scan.success %}
+                    <span class="pulse-dot pulse-green"></span>
+                    <span class="status-text">{{ last_scan.scan_time }}</span>
+                {% elif last_scan %}
+                    <span class="pulse-dot pulse-red"></span>
+                    <span class="status-text">Scan failed</span>
                 {% else %}
-                    Scan failed
+                    <span class="pulse-dot pulse-gray"></span>
+                    <span class="status-text">Waiting</span>
                 {% endif %}
-                &bull; {{ "%.1f"|format(last_scan.duration_seconds or 0) }}s
-            </span>
+            </div>
+            <button id="scan-btn" class="scan-btn" onclick="triggerScan()">
+                <svg class="scan-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="23 4 23 10 17 10"></polyline>
+                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                </svg>
+                <span class="scan-label">Scan Now</span>
+            </button>
         </div>
-    {% else %}
-        <div class="status-indicator">
-            <span class="dot dot-gray"></span>
-            <span>No scans yet</span>
-        </div>
-    {% endif %}
-    <button id="scan-now-btn" class="btn btn-sm" onclick="triggerScan()">Scan Now</button>
+    </div>
 </div>
 
-<!-- Available Slots -->
-<section class="card">
-    <h2>Available Slots
-        {% if total_slots > 0 %}
-            <span class="badge badge-green">{{ total_slots }}</span>
-        {% else %}
-            <span class="badge badge-gray">None</span>
-        {% endif %}
-    </h2>
+<!-- Spacer for sticky topbar -->
+<div class="topbar-spacer"></div>
 
-    {% if grouped_slots %}
-        {% for date_str, slots in grouped_slots|dictsort %}
-            <div class="date-group">
-                <h3>
-                    {{ slots[0].day_of_week }}, {{ date_str }}
-                    {% if slots[0].day_of_week in ['Saturday', 'Sunday'] %}
-                        <span class="badge badge-blue">Weekend</span>
-                    {% endif %}
-                </h3>
-                <div class="slot-grid">
-                    {% for slot in slots %}
-                        <div class="slot-card">
-                            <span class="slot-time">{{ slot.slot_time }}</span>
-                            {% if slot.court_name %}
-                                <span class="slot-court">{{ slot.court_name }}</span>
-                            {% endif %}
-                        </div>
-                    {% endfor %}
-                </div>
+<!-- Slot Count Summary -->
+<div class="summary">
+    <div class="summary-count" id="total-count">{{ total_slots }}</div>
+    <div class="summary-label">slot{{ 's' if total_slots != 1 }} available in the next 6 days</div>
+</div>
+
+<!-- 6-Day Calendar -->
+<div class="calendar-scroll">
+    <div class="calendar-grid">
+        {% for day in calendar %}
+        <div class="day-card {{ 'day-weekend' if day.is_weekend }}" data-date="{{ day.date }}">
+            <div class="day-header">
+                <span class="day-name">{{ day.day_name }}</span>
+                <span class="day-date">{{ day.date_display }}</span>
+                {% if day.is_tomorrow %}
+                    <span class="day-tag">Tomorrow</span>
+                {% elif day.is_weekend %}
+                    <span class="day-tag day-tag-weekend">{{ day.day_full }}</span>
+                {% endif %}
             </div>
+            <div class="day-slots">
+                {% if day.slots %}
+                    {% for slot in day.slots %}
+                    <div class="slot-chip">
+                        <span class="slot-time">{{ slot.slot_time }}</span>
+                        {% if slot.court_name %}
+                            <span class="slot-court">{{ slot.court_name }}</span>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="no-slots">No slots</div>
+                {% endif %}
+            </div>
+        </div>
         {% endfor %}
-        <div class="book-cta">
-            <a href="https://apm.activecommunities.com/chicagoparkdistrict/Reserve_Options"
-               class="btn btn-primary" target="_blank" rel="noopener">
-                Book Now &rarr;
-            </a>
-        </div>
-    {% else %}
-        <div class="empty-state">
-            <p>No available slots matching your preferences right now.</p>
-            <p class="text-muted">Checking every 5-15 minutes. You'll get an email when slots open up.</p>
-        </div>
-    {% endif %}
-</section>
-
-<!-- Scan History -->
-<section class="card">
-    <h2>Recent Scans</h2>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>Time</th>
-                    <th>Status</th>
-                    <th>Slots</th>
-                    <th>Duration</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for scan in recent_scans %}
-                <tr>
-                    <td>{{ scan.scan_time }}</td>
-                    <td>
-                        {% if scan.success %}
-                            <span class="dot dot-green"></span> OK
-                        {% else %}
-                            <span class="dot dot-red"></span> Failed
-                        {% endif %}
-                    </td>
-                    <td>{{ scan.slots_found }}</td>
-                    <td>{{ "%.1f"|format(scan.duration_seconds or 0) }}s</td>
-                </tr>
-                {% endfor %}
-                {% if not recent_scans %}
-                <tr><td colspan="4" class="text-muted">No scans yet</td></tr>
-                {% endif %}
-            </tbody>
-        </table>
     </div>
-</section>
+</div>
 
-<!-- Notification History -->
-<section class="card">
-    <h2>Notifications Sent</h2>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>Time</th>
-                    <th>Subject</th>
-                    <th>Slots</th>
-                    <th>Status</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for notif in notifications %}
-                <tr>
-                    <td>{{ notif.sent_time }}</td>
-                    <td>{{ notif.subject }}</td>
-                    <td>{{ notif.slot_count }}</td>
-                    <td>
-                        {% if notif.success %}
-                            <span class="dot dot-green"></span> Sent
-                        {% else %}
-                            <span class="dot dot-red"></span> Failed
-                        {% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
-                {% if not notifications %}
-                <tr><td colspan="4" class="text-muted">No notifications yet</td></tr>
-                {% endif %}
-            </tbody>
-        </table>
-    </div>
-</section>
+<!-- Book Now -->
+{% if total_slots > 0 %}
+<div class="book-bar">
+    <a href="https://apm.activecommunities.com/chicagoparkdistrict/Reserve_Options"
+       class="book-btn" target="_blank" rel="noopener">
+        Book Now
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+            <polyline points="15 3 21 3 21 9"></polyline>
+            <line x1="10" y1="14" x2="21" y2="3"></line>
+        </svg>
+    </a>
+</div>
+{% endif %}
 
-<p class="text-muted text-center" id="auto-refresh-note">
-    Auto-refreshing every 60s &bull; {{ now }}
-</p>
+<!-- Activity Feed -->
+<div class="feed">
+
+    <!-- Recent Scans -->
+    <details class="feed-section" open>
+        <summary class="feed-heading">
+            <span>Recent Scans</span>
+            <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+        </summary>
+        <div class="feed-list">
+            {% for scan in recent_scans %}
+            <div class="feed-row">
+                <span class="feed-dot {{ 'feed-dot-ok' if scan.success else 'feed-dot-err' }}"></span>
+                <span class="feed-time">{{ scan.scan_time }}</span>
+                <span class="feed-meta">{{ scan.slots_found }} slot{{ 's' if scan.slots_found != 1 }}</span>
+                <span class="feed-meta">{{ "%.1f"|format(scan.duration_seconds or 0) }}s</span>
+            </div>
+            {% endfor %}
+            {% if not recent_scans %}
+            <div class="feed-empty">No scans yet</div>
+            {% endif %}
+        </div>
+    </details>
+
+    <!-- Notifications -->
+    <details class="feed-section">
+        <summary class="feed-heading">
+            <span>Notifications</span>
+            <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+        </summary>
+        <div class="feed-list">
+            {% for notif in notifications %}
+            <div class="feed-row">
+                <span class="feed-dot {{ 'feed-dot-ok' if notif.success else 'feed-dot-err' }}"></span>
+                <span class="feed-time">{{ notif.sent_time }}</span>
+                <span class="feed-meta">{{ notif.slot_count }} slot{{ 's' if notif.slot_count != 1 }}</span>
+            </div>
+            {% endfor %}
+            {% if not notifications %}
+            <div class="feed-empty">No notifications yet</div>
+            {% endif %}
+        </div>
+    </details>
+
+</div>
+
+<!-- Footer -->
+<div class="page-footer">
+    <span>McFetridge Sports Center</span>
+    <span class="footer-sep">&middot;</span>
+    <span>3843 N California Ave, Chicago</span>
+    <br>
+    <span class="footer-refresh" id="refresh-note">Auto-refreshing every 30s</span>
+</div>
 
 {% endblock %}
 
 {% block scripts %}
 <script>
-    // Auto-refresh status every 60 seconds
-    setInterval(async () => {
+(function() {
+    // In-place refresh every 30 seconds
+    setInterval(refreshStatus, 30000);
+
+    async function refreshStatus() {
         try {
             const resp = await fetch('/api/status');
-            if (resp.ok) {
-                // Reload the page to update all sections
-                window.location.reload();
-            }
+            if (!resp.ok) return;
+            const data = await resp.json();
+            updateCalendar(data.calendar);
+            updateCount(data.total_slots);
+            updateStatus(data);
         } catch (e) {
-            console.error('Auto-refresh failed:', e);
+            console.error('Refresh failed:', e);
         }
-    }, 60000);
+    }
 
-    async function triggerScan() {
-        const btn = document.getElementById('scan-now-btn');
+    function updateCalendar(calendar) {
+        calendar.forEach(day => {
+            const card = document.querySelector(`.day-card[data-date="${day.date}"]`);
+            if (!card) return;
+            const slotsEl = card.querySelector('.day-slots');
+            if (day.slots.length > 0) {
+                slotsEl.innerHTML = day.slots.map(s => {
+                    const court = s.court_name ? `<span class="slot-court">${s.court_name}</span>` : '';
+                    return `<div class="slot-chip"><span class="slot-time">${s.slot_time}</span>${court}</div>`;
+                }).join('');
+            } else {
+                slotsEl.innerHTML = '<div class="no-slots">No slots</div>';
+            }
+        });
+    }
+
+    function updateCount(total) {
+        const el = document.getElementById('total-count');
+        if (el) el.textContent = total;
+    }
+
+    function updateStatus(data) {
+        const dot = document.querySelector('.pulse-dot');
+        const text = document.querySelector('.status-text');
+        if (!dot || !text) return;
+        if (data.last_scan_success) {
+            dot.className = 'pulse-dot pulse-green';
+            text.textContent = data.last_scan_time;
+        } else if (data.last_scan_time) {
+            dot.className = 'pulse-dot pulse-red';
+            text.textContent = 'Scan failed';
+        }
+    }
+
+    // Scan Now button
+    window.triggerScan = async function() {
+        const btn = document.getElementById('scan-btn');
+        const label = btn.querySelector('.scan-label');
+        const icon = btn.querySelector('.scan-icon');
         btn.disabled = true;
-        btn.textContent = 'Scanning...';
+        label.textContent = 'Scanning';
+        icon.style.animation = 'spin 0.8s linear infinite';
         try {
             const resp = await fetch('/api/scan-now', { method: 'POST' });
             const data = await resp.json();
             if (resp.ok) {
-                btn.textContent = `Done (${data.slots_found} slots)`;
-                setTimeout(() => window.location.reload(), 1500);
+                label.textContent = `${data.slots_found} found`;
+                setTimeout(() => refreshStatus(), 500);
+                setTimeout(() => {
+                    label.textContent = 'Scan Now';
+                    icon.style.animation = '';
+                    btn.disabled = false;
+                }, 2000);
             } else {
-                btn.textContent = 'Error';
-                setTimeout(() => { btn.textContent = 'Scan Now'; btn.disabled = false; }, 3000);
+                label.textContent = 'Error';
+                setTimeout(() => { label.textContent = 'Scan Now'; icon.style.animation = ''; btn.disabled = false; }, 3000);
             }
         } catch (e) {
-            btn.textContent = 'Error';
-            setTimeout(() => { btn.textContent = 'Scan Now'; btn.disabled = false; }, 3000);
+            label.textContent = 'Error';
+            setTimeout(() => { label.textContent = 'Scan Now'; icon.style.animation = ''; btn.disabled = false; }, 3000);
         }
-    }
+    };
+})();
 </script>
 {% endblock %}

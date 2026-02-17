@@ -119,17 +119,6 @@
             var totalSlots = 0;
             calendar.forEach(function(d) { totalSlots += (d.slots ? d.slots.length : 0); });
 
-            // Empty state: all days booked
-            if (calendar.length > 0 && totalSlots === 0) {
-                grid.innerHTML =
-                    '<div class="empty-hero">' +
-                        '<div class="empty-icon">&#127934;</div>' +
-                        '<div class="empty-title">No courts available</div>' +
-                        '<div class="empty-body">All courts are fully booked for the next 6 days. New slots open at 7 AM CT daily.</div>' +
-                    '</div>';
-                return;
-            }
-
             if (!calendar.length) {
                 grid.innerHTML = '<div class="empty-hero"><div class="empty-title">No data yet</div></div>';
                 return;

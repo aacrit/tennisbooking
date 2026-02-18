@@ -1,15 +1,8 @@
 {
-  "last_scan_time": "2026-02-17 17:06:32 CT",
+  "last_scan_time": "2026-02-17 18:01:07 CT",
   "last_scan_success": true,
   "slots_found": 0,
   "calendar": [
-    {
-      "date": "2026-02-18",
-      "date_display": "Feb 18",
-      "day_name": "Wed",
-      "is_weekend": false,
-      "slots": []
-    },
     {
       "date": "2026-02-19",
       "date_display": "Feb 19",
@@ -44,11 +37,18 @@
       "day_name": "Mon",
       "is_weekend": false,
       "slots": []
+    },
+    {
+      "date": "2026-02-24",
+      "date_display": "Feb 24",
+      "day_name": "Tue",
+      "is_weekend": false,
+      "slots": []
     }
   ],
   "total_slots": 0,
   "changes": {
-    "since": "2026-02-17 16:01:41 CT",
+    "since": "2026-02-17 17:06:32 CT",
     "opened": [],
     "closed": []
   }

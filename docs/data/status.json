@@ -1,5 +1,5 @@
 {
-  "last_scan_time": "2026-02-17 18:01:07 CT",
+  "last_scan_time": "2026-02-17 20:54:26 CT",
   "last_scan_success": true,
   "slots_found": 0,
   "calendar": [
@@ -48,7 +48,7 @@
   ],
   "total_slots": 0,
   "changes": {
-    "since": "2026-02-17 17:06:32 CT",
+    "since": "2026-02-17 18:01:07 CT",
     "opened": [],
     "closed": []
   }

@@ -20,7 +20,7 @@ from scraper.checker import AvailabilityChecker
 from scraper.parser import filter_slots, filter_other_slots
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG if os.environ.get("SCRAPER_DEBUG") else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
@@ -111,8 +111,9 @@ async def main():
 
     old_status = load_previous_status()
 
+    diag_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diagnostics")
     try:
-        checker = AvailabilityChecker(settings)
+        checker = AvailabilityChecker(settings, diag_dir=diag_dir)
         raw_slots = await checker.check_availability()
         filtered = filter_slots(raw_slots, settings)
     except Exception as e:
@@ -126,6 +127,8 @@ async def main():
             "calendar": calendar,
             "total_slots": 0,
             "changes": compute_changes(old_status, calendar, now_ct),
+            "other_calendar": build_calendar([]),
+            "other_total_slots": 0,
         })
         # Don't sys.exit(1) — let the workflow commit the failure status
         # so the dashboard shows when the last attempt was made

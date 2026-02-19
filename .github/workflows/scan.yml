@@ -40,9 +40,19 @@ jobs:
         env:
           WEEKDAY_EARLIEST_HOUR: '18'
           DAYS_AHEAD: '6'
+          SCRAPER_DEBUG: '1'
           GREEN_API_INSTANCE_ID: ${{ secrets.GREEN_API_INSTANCE_ID }}
           GREEN_API_TOKEN: ${{ secrets.GREEN_API_TOKEN }}
           WHATSAPP_CHAT_ID: ${{ secrets.WHATSAPP_CHAT_ID }}
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-diagnostics-${{ github.run_number }}
+          path: diagnostics/
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Commit and push if changed
         run: |

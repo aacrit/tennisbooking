@@ -1,5 +1,5 @@
 {
-  "last_scan_time": "2026-02-19 13:29:47 CT",
+  "last_scan_time": "2026-02-19 14:26:37 CT",
   "last_scan_success": true,
   "slots_found": 0,
   "calendar": [
@@ -48,8 +48,195 @@
   ],
   "total_slots": 0,
   "changes": {
-    "since": "2026-02-19 12:34:01 CT",
+    "since": "2026-02-19 13:29:47 CT",
     "opened": [],
     "closed": []
-  }
+  },
+  "other_calendar": [
+    {
+      "date": "2026-02-20",
+      "date_display": "Feb 20",
+      "day_name": "Fri",
+      "is_weekend": false,
+      "slots": [
+        {
+          "slot_time": "06:15 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "07:15 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "09:50 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "11:00 PM",
+          "court_name": "Act"
+        }
+      ]
+    },
+    {
+      "date": "2026-02-21",
+      "date_display": "Feb 21",
+      "day_name": "Sat",
+      "is_weekend": true,
+      "slots": [
+        {
+          "slot_time": "09:00 AM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "09:00 AM",
+          "court_name": "ct 218"
+        },
+        {
+          "slot_time": "09:00 AM",
+          "court_name": "2026McFetridge Clubroom"
+        },
+        {
+          "slot_time": "10:50 AM",
+          "court_name": "ct 218"
+        },
+        {
+          "slot_time": "10:50 AM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "06:15 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "07:15 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "09:50 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "11:00 PM",
+          "court_name": "Act"
+        }
+      ]
+    },
+    {
+      "date": "2026-02-22",
+      "date_display": "Feb 22",
+      "day_name": "Sun",
+      "is_weekend": true,
+      "slots": [
+        {
+          "slot_time": "09:00 AM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "09:00 AM",
+          "court_name": "ct 218"
+        },
+        {
+          "slot_time": "09:00 AM",
+          "court_name": "2026McFetridge Clubroom"
+        },
+        {
+          "slot_time": "10:50 AM",
+          "court_name": "ct 218"
+        },
+        {
+          "slot_time": "10:50 AM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "06:15 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "07:15 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "09:50 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "11:00 PM",
+          "court_name": "Act"
+        }
+      ]
+    },
+    {
+      "date": "2026-02-23",
+      "date_display": "Feb 23",
+      "day_name": "Mon",
+      "is_weekend": false,
+      "slots": [
+        {
+          "slot_time": "06:15 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "07:15 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "09:50 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "11:00 PM",
+          "court_name": "Act"
+        }
+      ]
+    },
+    {
+      "date": "2026-02-24",
+      "date_display": "Feb 24",
+      "day_name": "Tue",
+      "is_weekend": false,
+      "slots": [
+        {
+          "slot_time": "06:15 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "07:15 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "09:50 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "11:00 PM",
+          "court_name": "Act"
+        }
+      ]
+    },
+    {
+      "date": "2026-02-25",
+      "date_display": "Feb 25",
+      "day_name": "Wed",
+      "is_weekend": false,
+      "slots": [
+        {
+          "slot_time": "06:15 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "07:15 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "09:50 PM",
+          "court_name": "Act"
+        },
+        {
+          "slot_time": "11:00 PM",
+          "court_name": "Act"
+        }
+      ]
+    }
+  ],
+  "other_total_slots": 34
 }

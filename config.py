@@ -16,13 +16,18 @@ class Settings(BaseSettings):
     quiet_start_hour: int = 0           # No scans midnight-6AM
     quiet_end_hour: int = 6
 
-    # [GITHUB-PAGES] Email config disabled for static deployment
-    # smtp_server: str = "smtp.gmail.com"
-    # smtp_port: int = 587
-    # smtp_username: str = ""
-    # smtp_password: str = ""             # Gmail App Password
-    # notify_email: str = "aacritm@gmail.com"
-    # from_email: str = ""
+    # WhatsApp notifications via Green API
+    green_api_instance_id: str = ""
+    green_api_token: str = ""
+    whatsapp_chat_id: str = ""
+
+    # API polling (lightweight HTTP checks between Playwright scans)
+    api_poll_enabled: bool = True
+    api_poll_peak_seconds: int = 15       # 6:55-7:10 AM burst interval
+    api_poll_normal_seconds: int = 120    # 8 AM-midnight interval
+
+    # Notification throttle
+    notify_cooldown_seconds: int = 60     # Don't re-notify same slot within 60s
 
     # Time filters
     weekday_earliest_hour: int = 18     # 6 PM for Mon-Fri

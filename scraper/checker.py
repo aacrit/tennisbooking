@@ -9,7 +9,8 @@ import json
 import logging
 import re
 from datetime import date, timedelta
-from playwright.async_api import async_playwright, Page, Response
+from datetime import datetime as dt
+from playwright.async_api import async_playwright, Page, Response, Request
 
 from config import Settings
 
@@ -44,7 +45,21 @@ class AvailabilityChecker:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.captured_responses: list[dict] = []
+        self.captured_request_headers: dict[str, dict] = {}
         self.all_network_urls: list[str] = []
+        self._browser_cookies: dict[str, str] = {}
+
+    async def _on_request(self, request: Request):
+        """Capture request headers for API endpoints (used by the lightweight poller)."""
+        url_lower = request.url.lower()
+        if any(p in url_lower for p in AVAILABILITY_API_PATTERNS):
+            headers = dict(request.headers)
+            # Keep only useful headers for replay
+            keep = {"cookie", "authorization", "x-csrf-token", "x-requested-with",
+                    "accept", "referer", "origin", "content-type"}
+            self.captured_request_headers[request.url] = {
+                k: v for k, v in headers.items() if k.lower() in keep
+            }
 
     async def _on_response(self, response: Response):
         """Intercept all responses; capture those that look like availability data."""
@@ -72,7 +87,9 @@ class AvailabilityChecker:
         Returns list of raw slot dicts with keys: date, time, court_name, etc.
         """
         self.captured_responses = []
+        self.captured_request_headers = {}
         self.all_network_urls = []
+        self._browser_cookies = {}
         all_slots = []
 
         async with async_playwright() as p:
@@ -88,6 +105,7 @@ class AvailabilityChecker:
                 ),
             )
             page = await context.new_page()
+            page.on("request", self._on_request)
             page.on("response", self._on_response)
 
             try:
@@ -108,6 +126,12 @@ class AvailabilityChecker:
                 )
                 raise
             finally:
+                # Capture cookies before closing for the API poller
+                try:
+                    cookies = await context.cookies()
+                    self._browser_cookies = {c["name"]: c["value"] for c in cookies}
+                except Exception:
+                    pass
                 await browser.close()
 
         return all_slots
@@ -609,3 +633,32 @@ class AvailabilityChecker:
         """Get the list of dates to check (next N days)."""
         today = date.today()
         return [today + timedelta(days=i) for i in range(1, self.settings.days_ahead + 1)]
+
+    def get_api_context(self) -> dict:
+        """Return discovered API endpoints, cookies, and headers for the lightweight poller.
+
+        Call this after check_availability() completes. The returned dict contains
+        everything needed to replay the API calls without a browser.
+        """
+        endpoints = []
+        for resp in self.captured_responses:
+            url = resp["url"]
+            data = resp.get("data")
+            # Check if response looks like it contains slot/availability data
+            data_str = json.dumps(data)[:2000].lower() if data else ""
+            has_slots = any(k in data_str for k in [
+                "timeslot", "starttime", "start_time", "available",
+                "schedule", "facility", "court",
+            ])
+            endpoints.append({
+                "url": url,
+                "method": "GET",
+                "headers": self.captured_request_headers.get(url, {}),
+                "has_slot_data": has_slots,
+            })
+
+        return {
+            "endpoints": endpoints,
+            "cookies": self._browser_cookies,
+            "discovered_at": dt.utcnow().isoformat(),
+        }

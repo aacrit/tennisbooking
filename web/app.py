@@ -48,9 +48,8 @@ def _build_calendar(grouped_slots: dict) -> list[dict]:
 async def dashboard(request: Request):
     recent_scans = await db.get_recent_scans(limit=5)
     current_slots = await db.get_current_availability()
-    # [GITHUB-PAGES] Notifications disabled for static deployment
-    # notifications = await db.get_notification_history(limit=3)
-    notifications = []
+    notifications = await db.get_notification_history(limit=5)
+    slot_events = await db.get_slot_events(limit=20)
     last_scan = recent_scans[0] if recent_scans else None
 
     grouped_slots = {}
@@ -67,6 +66,7 @@ async def dashboard(request: Request):
         "total_slots": total_slots,
         "recent_scans": recent_scans,
         "notifications": notifications,
+        "slot_events": slot_events,
     })
 
 
@@ -101,6 +101,20 @@ async def api_status():
         ],
         "total_slots": sum(len(d["slots"]) for d in calendar),
     }
+
+
+@app.get("/api/slot-events")
+async def api_slot_events(limit: int = 100):
+    """Return recent slot lifecycle events (opened/closed)."""
+    events = await db.get_slot_events(limit=limit)
+    return {"events": events}
+
+
+@app.get("/api/notifications")
+async def api_notifications(limit: int = 50):
+    """Return recent notification history."""
+    notifications = await db.get_notification_history(limit=limit)
+    return {"notifications": notifications}
 
 
 @app.post("/api/scan-now")

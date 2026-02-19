@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import db
+from scraper.parser import ALLOWED_COURTS_RE
 
 WEB_DIR = Path(__file__).parent
 app = FastAPI(title="Tennis Court Monitor")
@@ -52,18 +53,29 @@ async def dashboard(request: Request):
     slot_events = await db.get_slot_events(limit=20)
     last_scan = recent_scans[0] if recent_scans else None
 
-    grouped_slots = {}
+    # Split slots into tennis vs non-tennis
+    tennis_grouped = {}
+    other_grouped = {}
     for slot in current_slots:
-        grouped_slots.setdefault(slot["slot_date"], []).append(slot)
+        name = slot.get("court_name", "")
+        if ALLOWED_COURTS_RE.search(name):
+            tennis_grouped.setdefault(slot["slot_date"], []).append(slot)
+        elif name:
+            other_grouped.setdefault(slot["slot_date"], []).append(slot)
 
-    calendar = _build_calendar(grouped_slots)
+    calendar = _build_calendar(tennis_grouped)
     total_slots = sum(len(day["slots"]) for day in calendar)
+
+    other_calendar = _build_calendar(other_grouped)
+    other_total_slots = sum(len(day["slots"]) for day in other_calendar)
 
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "last_scan": last_scan,
         "calendar": calendar,
         "total_slots": total_slots,
+        "other_calendar": other_calendar,
+        "other_total_slots": other_total_slots,
         "recent_scans": recent_scans,
         "notifications": notifications,
         "slot_events": slot_events,
@@ -76,17 +88,21 @@ async def api_status():
     slots = await db.get_current_availability()
     last = scans[0] if scans else None
 
-    grouped_slots = {}
+    # Split slots into tennis vs non-tennis
+    tennis_grouped = {}
+    other_grouped = {}
     for slot in slots:
-        grouped_slots.setdefault(slot["slot_date"], []).append(slot)
+        name = slot.get("court_name", "")
+        if ALLOWED_COURTS_RE.search(name):
+            tennis_grouped.setdefault(slot["slot_date"], []).append(slot)
+        elif name:
+            other_grouped.setdefault(slot["slot_date"], []).append(slot)
 
-    calendar = _build_calendar(grouped_slots)
+    calendar = _build_calendar(tennis_grouped)
+    other_calendar = _build_calendar(other_grouped)
 
-    return {
-        "last_scan_time": last["scan_time"] if last else None,
-        "last_scan_success": bool(last["success"]) if last else None,
-        "slots_found": last["slots_found"] if last else 0,
-        "calendar": [
+    def _calendar_json(cal):
+        return [
             {
                 "date": day["date"],
                 "date_display": day["date_display"],
@@ -97,9 +113,17 @@ async def api_status():
                     for s in day["slots"]
                 ],
             }
-            for day in calendar
-        ],
+            for day in cal
+        ]
+
+    return {
+        "last_scan_time": last["scan_time"] if last else None,
+        "last_scan_success": bool(last["success"]) if last else None,
+        "slots_found": last["slots_found"] if last else 0,
+        "calendar": _calendar_json(calendar),
         "total_slots": sum(len(d["slots"]) for d in calendar),
+        "other_calendar": _calendar_json(other_calendar),
+        "other_total_slots": sum(len(d["slots"]) for d in other_calendar),
     }
 
 

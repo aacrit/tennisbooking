@@ -21,6 +21,10 @@
     --weekend-bg: #f0f1ff;
     --weekend-border: rgba(99,102,241,0.08);
 
+    --blue: #007aff;
+    --blue-bg: rgba(0,122,255,0.1);
+    --blue-border: rgba(0,122,255,0.2);
+
     --radius-sm: 8px;
     --radius-md: 12px;
     --radius-lg: 16px;
@@ -49,6 +53,9 @@
         --red-bg: rgba(255,59,48,0.15);
         --weekend-bg: rgba(99,102,241,0.08);
         --weekend-border: rgba(99,102,241,0.12);
+
+        --blue-bg: rgba(0,122,255,0.15);
+        --blue-border: rgba(0,122,255,0.25);
     }
 }
 
@@ -300,6 +307,44 @@ details[open] > .feed-heading .chevron { transform: rotate(180deg); }
 .feed-meta { color: var(--text-3); margin-left: auto; }
 .feed-meta + .feed-meta { margin-left: 0; }
 .feed-empty { font-size: 12px; color: var(--text-3); padding: 8px; }
+
+/* ───── Non-Tennis Availability ───── */
+.other-availability {
+    margin-top: 24px; border-radius: var(--radius-md);
+}
+.other-heading {
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 12px; font-size: 13px; font-weight: 500; color: var(--text-2);
+    text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer;
+    border-radius: var(--radius-sm); transition: background 0.15s var(--ease); list-style: none;
+}
+.other-heading::-webkit-details-marker { display: none; }
+.other-heading::marker { content: ''; }
+.other-heading:hover { background: var(--surface-hover); }
+.other-heading .chevron { margin-left: auto; }
+details[open] > .other-heading .chevron { transform: rotate(180deg); }
+
+.other-count {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 20px; height: 20px; font-size: 11px; font-weight: 600;
+    color: #fff; background: var(--blue); border-radius: 999px; padding: 0 6px;
+}
+.other-badge {
+    background: var(--blue) !important;
+}
+.other-availability .calendar-grid { margin-top: 4px; }
+.other-slot-chip {
+    background: var(--blue-bg) !important;
+    border-color: var(--blue-border) !important;
+    cursor: default;
+}
+.other-slot-chip:hover {
+    background: rgba(0,122,255,0.18) !important;
+    transform: none;
+}
+.other-slot-chip .slot-time {
+    color: var(--blue) !important;
+}
 
 /* ───── Footer ───── */
 .page-footer {

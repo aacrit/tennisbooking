@@ -27,12 +27,28 @@ AVAILABILITY_API_PATTERNS = [
     "/reservation",
     "/booking",
     "/calendar",
+    "/activity",
+    "/session",
+    "/enrollment",
 ]
 
-# Booking portal URL
+# McFetridge activity search — this is the ACTUAL path users take to find court time
+ACTIVITY_SEARCH_URL = (
+    "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
+    "activity/search?onlineSiteId=0&locale=en-US"
+    "&activity_select_param=2&activity_keyword=mcfetridge&viewMode=list"
+)
+
+# Quick reservation URL (facility reservation interface)
 BOOKING_URL = (
     "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
     "reservation/landing/quick?groupId=1&locale=en-US"
+)
+
+# Reservation page (where "Make a Reservation" on mcfetridgesportscenter.com redirects)
+RESERVATION_URL = (
+    "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
+    "reservation?onlineSiteId=0&from_original_cui=true"
 )
 
 # Legacy booking URL (may have simpler interface)
@@ -274,12 +290,22 @@ class AvailabilityChecker:
             page.on("response", self._on_response)
 
             try:
-                # Try the modern SPA first
-                all_slots = await self._check_modern_portal(page)
+                # Strategy 1: Activity search (primary — how users actually find court time)
+                all_slots = await self._check_activity_search(page)
 
-                # If no data, try the legacy portal
+                # Strategy 2: Quick reservation page
                 if not all_slots:
-                    logger.info("No slots from modern portal, trying legacy...")
+                    logger.info("No slots from activity search, trying quick reservation...")
+                    all_slots = await self._check_modern_portal(page)
+
+                # Strategy 3: Reservation page (where McFetridge site links to)
+                if not all_slots:
+                    logger.info("No slots from quick reservation, trying reservation page...")
+                    all_slots = await self._check_reservation_page(page)
+
+                # Strategy 4: Legacy portal
+                if not all_slots:
+                    logger.info("No slots from reservation page, trying legacy...")
                     all_slots = await self._check_legacy_portal(page)
 
             except Exception as e:
@@ -396,6 +422,165 @@ class AvailabilityChecker:
             await asyncio.sleep(2)
             page_slots = await self._extract_slots_from_dom(page, target_date)
             slots.extend(page_slots)
+
+        return slots
+
+    # ── Activity search approach (PRIMARY) ─────────────────────────
+
+    async def _check_activity_search(self, page: Page) -> list[dict]:
+        """Search for McFetridge activities and extract availability.
+
+        This is the primary approach — it mirrors what actual users do:
+        search for McFetridge activities, click on court time listings,
+        and view available sessions.
+        """
+        logger.info("Checking activity search: %s", ACTIVITY_SEARCH_URL)
+        await page.goto(ACTIVITY_SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_load_state("networkidle", timeout=30000)
+        await asyncio.sleep(4)  # Extra wait for SPA to render results
+
+        await self._save_diag(page, "activity_search_loaded")
+        await self._dump_dom_structure(page, "dom_activity_search")
+
+        slots = []
+
+        # Find activity listing links from the rendered search results
+        activity_links = await page.evaluate("""
+            () => {
+                const links = [];
+
+                // Strategy A: Look for links to activity detail pages
+                document.querySelectorAll('a[href*="/activity/search/detail/"]').forEach(el => {
+                    links.push({
+                        href: el.href,
+                        text: (el.textContent || '').trim().substring(0, 200),
+                    });
+                });
+
+                // Strategy B: Look for any links/buttons with court-related text
+                if (links.length === 0) {
+                    document.querySelectorAll('a, button, [role="link"]').forEach(el => {
+                        const text = (el.textContent || '').toLowerCase();
+                        const href = el.href || el.getAttribute('href') || '';
+                        if (text.includes('court time') || text.includes('tennis ct') ||
+                            text.includes('pickleball') || text.includes('ball machine') ||
+                            text.includes('mcfetridge')) {
+                            links.push({
+                                href: href,
+                                text: (el.textContent || '').trim().substring(0, 200),
+                            });
+                        }
+                    });
+                }
+
+                // Strategy C: Look for any card/list item components with activity names
+                if (links.length === 0) {
+                    const cardSelectors = [
+                        '[class*="activity"]', '[class*="result"]',
+                        '[class*="card"]', '[class*="listing"]',
+                        '[class*="item"]', 'li',
+                    ];
+                    for (const sel of cardSelectors) {
+                        document.querySelectorAll(sel).forEach(el => {
+                            const text = (el.textContent || '').toLowerCase();
+                            if (text.length < 500 && (
+                                text.includes('court') || text.includes('tennis') ||
+                                text.includes('pickleball') || text.includes('ball machine')
+                            )) {
+                                const link = el.querySelector('a');
+                                links.push({
+                                    href: link ? (link.href || '') : '',
+                                    text: (el.textContent || '').trim().substring(0, 200),
+                                    isCard: true,
+                                });
+                            }
+                        });
+                        if (links.length > 0) break;
+                    }
+                }
+
+                return links;
+            }
+        """)
+
+        logger.info("Found %d activity links/cards", len(activity_links))
+        self._save_diag_json("activity_links.json", activity_links)
+
+        # Visit each activity detail page to get availability
+        for link in activity_links[:10]:
+            href = link.get("href", "")
+            name = link.get("text", "").strip()
+            if not href or not href.startswith("http"):
+                continue
+
+            logger.info("Checking activity: %s", name[:80])
+            try:
+                await page.goto(href, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_load_state("networkidle", timeout=30000)
+                await asyncio.sleep(3)
+
+                safe_name = re.sub(r'[^\w]', '_', name[:30])
+                await self._save_diag(page, f"activity_{safe_name}")
+                await self._dump_dom_structure(page, f"dom_activity_{safe_name}")
+
+                # Extract from the activity detail page
+                target_dates = self._get_target_dates()
+                for td in target_dates:
+                    page_slots = await self._extract_slots_from_dom(page, td)
+                    # Use activity name as court_name fallback
+                    for s in page_slots:
+                        if not s.get("court_name"):
+                            s["court_name"] = name
+                    slots.extend(page_slots)
+
+            except Exception as e:
+                logger.warning("Error loading activity %s: %s", name[:50], e)
+
+        # Parse any API responses captured during activity browsing
+        api_slots = self._parse_captured_responses()
+        if api_slots:
+            slots.extend(api_slots)
+
+        logger.info(
+            "Activity search: %d links checked, %d total slots found",
+            len(activity_links), len(slots),
+        )
+
+        return slots
+
+    # ── Reservation page approach ─────────────────────────────────
+
+    async def _check_reservation_page(self, page: Page) -> list[dict]:
+        """Check the reservation page (where McFetridge site links to)."""
+        logger.info("Checking reservation page: %s", RESERVATION_URL)
+        try:
+            await page.goto(RESERVATION_URL, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_load_state("networkidle", timeout=30000)
+            await asyncio.sleep(3)
+        except Exception as e:
+            logger.warning("Reservation page failed to load: %s", e)
+            return []
+
+        await self._save_diag(page, "reservation_page_loaded")
+        await self._dump_dom_structure(page, "dom_reservation_page")
+
+        slots = []
+
+        # Try to interact with the reservation interface
+        await self._try_select_tennis(page)
+        await asyncio.sleep(2)
+
+        target_dates = self._get_target_dates()
+        for target_date in target_dates:
+            await self._try_select_date(page, target_date)
+            await asyncio.sleep(2)
+            page_slots = await self._extract_slots_from_dom(page, target_date)
+            slots.extend(page_slots)
+
+        # Check captured API responses
+        api_slots = self._parse_captured_responses()
+        if api_slots:
+            slots.extend(api_slots)
 
         return slots
 

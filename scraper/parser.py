@@ -84,12 +84,16 @@ def parse_date_string(date_str: str) -> date | None:
     return None
 
 
-def filter_slots(raw_slots: list[dict], settings: Settings) -> list[dict]:
+def _filter_slots_base(raw_slots: list[dict], settings: Settings,
+                       court_filter_fn) -> list[dict]:
     """
-    Filter availability slots based on user preferences:
-    - Weekdays (Mon-Fri): only slots at or after weekday_earliest_hour
-    - Weekends (Sat-Sun): all slots OK
-    - Only future dates within the lookahead window
+    Shared slot filtering with pluggable court name filter.
+
+    Applies:
+    - Date validation (future, within lookahead window)
+    - Time parsing and weekday/weekend hour filter
+    - court_filter_fn(court_name: str) -> bool
+    - Dedup by (date, time, court_name)
     """
     today = date.today()
     filtered = []
@@ -120,19 +124,13 @@ def filter_slots(raw_slots: list[dict], settings: Settings) -> list[dict]:
         if not is_weekend and slot_time.hour < settings.weekday_earliest_hour:
             continue
 
-        # Court name filter: require a valid court name matching Ct01-Ct06
-        # Slots with empty court_name are rejected (prevents false positives
-        # from scraper picking up non-slot DOM elements)
+        # Court name filter (caller decides tennis vs non-tennis)
         court_name = slot.get("court_name", "").strip()
-        if not court_name or not ALLOWED_COURTS_RE.search(court_name):
-            logger.debug(
-                "Rejecting slot with missing/invalid court_name: %r (date=%s, time=%s)",
-                court_name, slot.get("date"), slot.get("time"),
-            )
+        if not court_filter_fn(court_name):
             continue
 
         # Dedup by (date, time, court_name)
-        key = (slot_date.isoformat(), slot_time.strftime("%H:%M"), slot.get("court_name", ""))
+        key = (slot_date.isoformat(), slot_time.strftime("%H:%M"), court_name)
         if key in seen:
             continue
         seen.add(key)
@@ -141,7 +139,7 @@ def filter_slots(raw_slots: list[dict], settings: Settings) -> list[dict]:
             "date": slot_date.isoformat(),
             "time": slot_time.strftime("%I:%M %p"),
             "time_24h": slot_time.strftime("%H:%M"),
-            "court_name": slot.get("court_name", ""),
+            "court_name": court_name,
             "day_of_week": slot_date.strftime("%A"),
             "is_weekend": is_weekend,
             "duration_minutes": slot.get("duration_minutes", 60),
@@ -149,6 +147,33 @@ def filter_slots(raw_slots: list[dict], settings: Settings) -> list[dict]:
 
     # Sort by date then time
     filtered.sort(key=lambda s: (s["date"], s["time_24h"]))
-
-    logger.info("Filtered %d slots from %d raw entries", len(filtered), len(raw_slots))
     return filtered
+
+
+def filter_slots(raw_slots: list[dict], settings: Settings) -> list[dict]:
+    """
+    Filter for tennis court slots (Ct 01-06) based on user preferences:
+    - Weekdays (Mon-Fri): only slots at or after weekday_earliest_hour
+    - Weekends (Sat-Sun): all slots OK
+    - Only future dates within the lookahead window
+    """
+    def _tennis_court(name: str) -> bool:
+        return bool(name and ALLOWED_COURTS_RE.search(name))
+
+    result = _filter_slots_base(raw_slots, settings, _tennis_court)
+    logger.info("Filtered %d tennis slots from %d raw entries", len(result), len(raw_slots))
+    return result
+
+
+def filter_other_slots(raw_slots: list[dict], settings: Settings) -> list[dict]:
+    """
+    Filter for non-tennis slots (pickleball, ball machines, etc.).
+    Same date/time validation as filter_slots() but keeps slots whose
+    court_name does NOT match the tennis court regex.
+    """
+    def _non_tennis_court(name: str) -> bool:
+        return bool(name and not ALLOWED_COURTS_RE.search(name))
+
+    result = _filter_slots_base(raw_slots, settings, _non_tennis_court)
+    logger.info("Filtered %d non-tennis slots from %d raw entries", len(result), len(raw_slots))
+    return result

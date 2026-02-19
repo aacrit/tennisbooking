@@ -7,9 +7,11 @@ to DOM scraping to find available time slots.
 import asyncio
 import json
 import logging
+import os
 import re
 from datetime import date, timedelta
-from playwright.async_api import async_playwright, Page, Response
+from datetime import datetime as dt
+from playwright.async_api import async_playwright, Page, Response, Request
 
 from config import Settings
 
@@ -39,12 +41,187 @@ LEGACY_URL = (
     "ActiveNet_Home?FileName=onlinequickfacilityreserve.sdi"
 )
 
+# Broader facility name regex for non-tennis support
+FACILITY_RE = re.compile(
+    r'((?:McFetridge\s+)?(?:Tennis\s+(?:Ct|Court)\s*\d+|'
+    r'Pickleball\s*(?:Ct|Court)?\s*\d*|'
+    r'Ball\s+Machine\s*\d*|'
+    r'Court\s*\d+|Ct\s*\d+|'
+    r'(?:Tennis|Pickleball|Badminton|Volleyball)\s+\w+))',
+    re.IGNORECASE,
+)
+
+# Time and date patterns for deep JSON extraction
+_TIME_RE = re.compile(r'\d{1,2}:\d{2}(?:\s*[AP]M)?', re.IGNORECASE)
+_DATE_RE = re.compile(r'\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}')
+
 
 class AvailabilityChecker:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, diag_dir: str | None = None):
         self.settings = settings
         self.captured_responses: list[dict] = []
+        self.captured_request_headers: dict[str, dict] = {}
         self.all_network_urls: list[str] = []
+        self._browser_cookies: dict[str, str] = {}
+        self._diag_dir = diag_dir
+        self._diag_counter = 0
+
+    # ── Diagnostics helpers ──────────────────────────────────────────
+
+    async def _save_diag(self, page: Page, label: str):
+        """Save screenshot + HTML snapshot for diagnostics."""
+        if not self._diag_dir:
+            return
+        self._diag_counter += 1
+        prefix = f"{self._diag_counter:02d}_{label}"
+        try:
+            os.makedirs(self._diag_dir, exist_ok=True)
+            await page.screenshot(
+                path=os.path.join(self._diag_dir, f"{prefix}.png"),
+                full_page=True,
+            )
+            html = await page.content()
+            html_path = os.path.join(self._diag_dir, f"{prefix}.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html)
+            logger.debug("Saved diagnostic: %s", prefix)
+        except Exception as e:
+            logger.warning("Diagnostic save failed for %s: %s", label, e)
+
+    async def _dump_dom_structure(self, page: Page, label: str = "dom_structure"):
+        """Capture a summary of the page's DOM structure for diagnostics."""
+        if not self._diag_dir:
+            return
+        try:
+            dom_info = await page.evaluate("""
+                () => {
+                    const results = {
+                        title: document.title,
+                        url: window.location.href,
+                        all_classes: [],
+                        elements_with_time: [],
+                        elements_with_court: [],
+                        all_buttons: [],
+                        all_links_text: [],
+                        all_inputs: [],
+                        body_text_sample: (document.body?.innerText || '').substring(0, 5000),
+                    };
+
+                    // Collect all unique class names
+                    const classSet = new Set();
+                    document.querySelectorAll('*').forEach(el => {
+                        if (el.className && typeof el.className === 'string') {
+                            el.className.split(/\\s+/).forEach(c => { if (c) classSet.add(c); });
+                        }
+                    });
+                    results.all_classes = Array.from(classSet).sort();
+
+                    // Find elements containing time patterns (H:MM AM/PM)
+                    const timeRe = /\\d{1,2}:\\d{2}\\s*(AM|PM)/i;
+                    document.querySelectorAll('*').forEach(el => {
+                        const text = (el.textContent || '').trim();
+                        if (text.length < 200 && text.length > 0 && timeRe.test(text)) {
+                            results.elements_with_time.push({
+                                tag: el.tagName,
+                                class: el.className || '',
+                                text: text.substring(0, 200),
+                                id: el.id || '',
+                            });
+                        }
+                    });
+                    results.elements_with_time = results.elements_with_time.slice(0, 100);
+
+                    // Find elements containing court/tennis/pickleball text
+                    const courtRe = /tennis|court|pickleball|ball.machine|mcfetridge/i;
+                    document.querySelectorAll('*').forEach(el => {
+                        const text = (el.textContent || '').trim();
+                        if (text.length < 300 && text.length > 0 && courtRe.test(text)) {
+                            results.elements_with_court.push({
+                                tag: el.tagName,
+                                class: el.className || '',
+                                text: text.substring(0, 300),
+                                id: el.id || '',
+                            });
+                        }
+                    });
+                    results.elements_with_court = results.elements_with_court.slice(0, 100);
+
+                    // All buttons with text
+                    document.querySelectorAll('button, [role="button"]').forEach(el => {
+                        results.all_buttons.push({
+                            text: (el.textContent || '').trim().substring(0, 100),
+                            class: el.className || '',
+                            id: el.id || '',
+                        });
+                    });
+                    results.all_buttons = results.all_buttons.slice(0, 50);
+
+                    // All links with text
+                    document.querySelectorAll('a').forEach(el => {
+                        results.all_links_text.push({
+                            text: (el.textContent || '').trim().substring(0, 100),
+                            href: el.href || '',
+                            class: el.className || '',
+                        });
+                    });
+                    results.all_links_text = results.all_links_text.slice(0, 50);
+
+                    // All inputs/selects
+                    document.querySelectorAll('input, select, textarea').forEach(el => {
+                        results.all_inputs.push({
+                            tag: el.tagName,
+                            type: el.type || '',
+                            name: el.name || '',
+                            id: el.id || '',
+                            class: el.className || '',
+                            value: (el.value || '').substring(0, 100),
+                            placeholder: el.placeholder || '',
+                        });
+                    });
+
+                    // Check for global state objects
+                    const stateKeys = ['__REDUX_STATE__', '__reduxInitialState',
+                                       '__NEXT_DATA__', '__INITIAL_STATE__',
+                                       '__APP_DATA__', '__STORE__'];
+                    results.window_state = {};
+                    for (const key of stateKeys) {
+                        if (window[key]) results.window_state[key] = 'EXISTS';
+                    }
+
+                    return results;
+                }
+            """)
+            os.makedirs(self._diag_dir, exist_ok=True)
+            with open(os.path.join(self._diag_dir, f"{label}.json"), "w") as f:
+                json.dump(dom_info, f, indent=2, default=str)
+            logger.debug("Saved DOM structure: %s", label)
+        except Exception as e:
+            logger.warning("DOM structure dump failed: %s", e)
+
+    def _save_diag_json(self, filename: str, data):
+        """Save a JSON diagnostics file."""
+        if not self._diag_dir:
+            return
+        try:
+            os.makedirs(self._diag_dir, exist_ok=True)
+            with open(os.path.join(self._diag_dir, filename), "w") as f:
+                json.dump(data, f, indent=2, default=str)
+        except Exception as e:
+            logger.warning("Failed to save diagnostic %s: %s", filename, e)
+
+    # ── Network interception ─────────────────────────────────────────
+
+    async def _on_request(self, request: Request):
+        """Capture request headers for API endpoints (used by the lightweight poller)."""
+        url_lower = request.url.lower()
+        if any(p in url_lower for p in AVAILABILITY_API_PATTERNS):
+            headers = dict(request.headers)
+            # Keep only useful headers for replay
+            keep = {"cookie", "authorization", "x-csrf-token", "x-requested-with",
+                    "accept", "referer", "origin", "content-type"}
+            self.captured_request_headers[request.url] = {
+                k: v for k, v in headers.items() if k.lower() in keep
+            }
 
     async def _on_response(self, response: Response):
         """Intercept all responses; capture those that look like availability data."""
@@ -66,13 +243,18 @@ class AvailabilityChecker:
             except Exception:
                 pass
 
+    # ── Main entry point ─────────────────────────────────────────────
+
     async def check_availability(self) -> list[dict]:
         """
         Launch browser, navigate booking portal, extract available slots.
         Returns list of raw slot dicts with keys: date, time, court_name, etc.
         """
         self.captured_responses = []
+        self.captured_request_headers = {}
         self.all_network_urls = []
+        self._browser_cookies = {}
+        self._diag_counter = 0
         all_slots = []
 
         async with async_playwright() as p:
@@ -88,6 +270,7 @@ class AvailabilityChecker:
                 ),
             )
             page = await context.new_page()
+            page.on("request", self._on_request)
             page.on("response", self._on_response)
 
             try:
@@ -101,16 +284,39 @@ class AvailabilityChecker:
 
             except Exception as e:
                 logger.exception("Scraper error: %s", e)
-                # Log captured network URLs for debugging
                 logger.debug(
                     "Network URLs captured: %s",
                     json.dumps(self.all_network_urls[:50], indent=2),
                 )
                 raise
             finally:
+                # Capture cookies before closing for the API poller
+                try:
+                    cookies = await context.cookies()
+                    self._browser_cookies = {c["name"]: c["value"] for c in cookies}
+                except Exception:
+                    pass
+
+                # Save final diagnostics
+                self._save_diag_json("network_urls.json", self.all_network_urls)
+                api_diag = []
+                for resp in self.captured_responses:
+                    url = resp["url"]
+                    data = resp.get("data")
+                    api_diag.append({
+                        "url": url,
+                        "type": type(data).__name__,
+                        "keys": list(data.keys()) if isinstance(data, dict) else None,
+                        "length": len(data) if isinstance(data, list) else None,
+                        "sample": json.dumps(data, default=str)[:3000],
+                    })
+                self._save_diag_json("api_responses.json", api_diag)
+
                 await browser.close()
 
         return all_slots
+
+    # ── Modern portal ────────────────────────────────────────────────
 
     async def _check_modern_portal(self, page: Page) -> list[dict]:
         """Navigate the modern ANC ActiveNet portal."""
@@ -119,12 +325,16 @@ class AvailabilityChecker:
         await page.wait_for_load_state("networkidle", timeout=30000)
         await asyncio.sleep(3)
 
+        await self._save_diag(page, "page_loaded")
+        await self._dump_dom_structure(page, "dom_structure_initial")
+
         # Try to find and interact with the facility reservation interface
         slots = []
 
         # Step 1: Look for facility/activity selection
         await self._try_select_tennis(page)
         await asyncio.sleep(2)
+        await self._save_diag(page, "after_tennis_select")
 
         # Step 2: Check dates
         target_dates = self._get_target_dates()
@@ -135,6 +345,8 @@ class AvailabilityChecker:
                 await page.wait_for_load_state("networkidle", timeout=15000)
                 await asyncio.sleep(2)
 
+            await self._save_diag(page, f"date_{target_date.isoformat()}")
+
             # Step 3: Extract available slots from DOM
             page_slots = await self._extract_slots_from_dom(page, target_date)
             slots.extend(page_slots)
@@ -144,7 +356,19 @@ class AvailabilityChecker:
         if api_slots:
             slots.extend(api_slots)
 
+        # Dump DOM structure after all navigation
+        await self._dump_dom_structure(page, "dom_structure_final")
+
+        logger.info(
+            "SCRAPER SUMMARY: captured_responses=%d, network_urls=%d, "
+            "dom_slots=%d, api_slots=%d, total=%d",
+            len(self.captured_responses), len(self.all_network_urls),
+            len(slots) - len(api_slots), len(api_slots), len(slots),
+        )
+
         return slots
+
+    # ── Legacy portal ────────────────────────────────────────────────
 
     async def _check_legacy_portal(self, page: Page) -> list[dict]:
         """Navigate the legacy ActiveNet portal."""
@@ -156,6 +380,8 @@ class AvailabilityChecker:
         except Exception as e:
             logger.warning("Legacy portal failed to load: %s", e)
             return []
+
+        await self._save_diag(page, "legacy_loaded")
 
         slots = []
 
@@ -172,6 +398,8 @@ class AvailabilityChecker:
             slots.extend(page_slots)
 
         return slots
+
+    # ── Facility selection ───────────────────────────────────────────
 
     async def _try_select_tennis(self, page: Page):
         """Try to select tennis/McFetridge from facility selection."""
@@ -199,12 +427,18 @@ class AvailabilityChecker:
         for selector in selectors_to_try:
             try:
                 el = await page.query_selector(selector)
-                if el and await el.is_visible():
-                    await el.click()
-                    logger.info("Clicked tennis selector: %s", selector)
-                    await asyncio.sleep(1)
-                    return True
-            except Exception:
+                if el:
+                    is_vis = await el.is_visible()
+                    logger.debug("Tennis selector '%s': found=True visible=%s", selector, is_vis)
+                    if is_vis:
+                        await el.click()
+                        logger.info("Clicked tennis selector: %s", selector)
+                        await asyncio.sleep(1)
+                        return True
+                else:
+                    logger.debug("Tennis selector '%s': not found", selector)
+            except Exception as e:
+                logger.debug("Tennis selector '%s': error=%s", selector, e)
                 continue
 
         # Try selecting from a dropdown by value
@@ -225,6 +459,8 @@ class AvailabilityChecker:
 
         logger.warning("Could not find tennis facility selector")
         return False
+
+    # ── Date selection ───────────────────────────────────────────────
 
     async def _try_select_date(self, page: Page, target_date: date) -> bool:
         """Try to select a specific date in the booking calendar."""
@@ -288,9 +524,12 @@ class AvailabilityChecker:
 
         return False
 
+    # ── Slot extraction from DOM ─────────────────────────────────────
+
     async def _extract_slots_from_dom(self, page: Page, target_date: date) -> list[dict]:
         """Extract available time slots from the rendered DOM."""
         slots = []
+        strategy_counts = {"redux": 0, "targeted_dom": 0, "broad_dom": 0, "text": 0}
 
         # Strategy 1: Try to read Redux store directly
         try:
@@ -309,18 +548,25 @@ class AvailabilityChecker:
                     return null;
                 }
             """)
-            if redux_data and ("slot" in redux_data.lower() or "available" in redux_data.lower()):
-                logger.info("Found Redux data with potential slots")
-                try:
-                    parsed = json.loads(redux_data)
-                    extracted = self._extract_from_state(parsed, target_date)
-                    slots.extend(extracted)
-                except Exception:
-                    pass
+            if redux_data:
+                # Save Redux state for diagnostics regardless of content
+                self._save_diag_json(
+                    f"redux_state_{target_date.isoformat()}.json",
+                    redux_data[:100000],
+                )
+                if "slot" in redux_data.lower() or "available" in redux_data.lower():
+                    logger.info("Found Redux data with potential slots")
+                    try:
+                        parsed = json.loads(redux_data)
+                        extracted = self._extract_from_state(parsed, target_date)
+                        strategy_counts["redux"] = len(extracted)
+                        slots.extend(extracted)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
-        # Strategy 2: Scrape visible slot elements from DOM
+        # Strategy 2: Scrape visible slot elements from DOM (targeted selectors)
         try:
             dom_slots = await page.evaluate("""
                 () => {
@@ -339,7 +585,7 @@ class AvailabilityChecker:
                         '[data-status="available"]',
                     ];
 
-                    const timePattern = /\d{1,2}:\d{2}\s*(AM|PM)/i;
+                    const timePattern = /\\d{1,2}:\\d{2}\\s*(AM|PM)/i;
 
                     for (const selector of slotSelectors) {
                         const elements = document.querySelectorAll(selector);
@@ -369,33 +615,103 @@ class AvailabilityChecker:
             """)
 
             if dom_slots:
-                logger.info("Found %d DOM elements with potential slot data", len(dom_slots))
+                logger.info("Found %d DOM elements with potential slot data (targeted)", len(dom_slots))
                 for el in dom_slots:
                     parsed_slot = self._parse_dom_element(el, target_date)
                     if parsed_slot:
                         slots.append(parsed_slot)
+                        strategy_counts["targeted_dom"] += 1
         except Exception as e:
-            logger.warning("DOM scraping error: %s", e)
+            logger.warning("DOM scraping error (targeted): %s", e)
+
+        # Strategy 2b: Broad DOM scan — find ALL elements with time text
+        try:
+            broad_slots = await page.evaluate("""
+                () => {
+                    const results = [];
+                    const timePattern = /\\d{1,2}:\\d{2}\\s*(AM|PM)/i;
+
+                    // Walk all leaf-ish elements (small text content)
+                    document.querySelectorAll('td, div, span, li, a, button, p, label').forEach(el => {
+                        const fullText = (el.textContent || '').trim();
+
+                        if (fullText.length > 500) return; // Skip large containers
+                        if (!timePattern.test(fullText)) return;
+
+                        // Walk up to find context (facility name, date, etc.)
+                        let contextEl = el;
+                        let contextText = '';
+                        for (let i = 0; i < 5 && contextEl; i++) {
+                            contextEl = contextEl.parentElement;
+                            if (contextEl) {
+                                const ct = (contextEl.textContent || '').trim();
+                                if (ct.length < 1000 && ct.length > contextText.length) {
+                                    contextText = ct;
+                                }
+                            }
+                        }
+
+                        results.push({
+                            text: fullText.substring(0, 300),
+                            contextText: contextText.substring(0, 500),
+                            className: el.className || '',
+                            tag: el.tagName,
+                            parentClass: (el.parentElement?.className) || '',
+                            dataAttrs: Object.fromEntries(
+                                Array.from(el.attributes || [])
+                                    .filter(a => a.name.startsWith('data-'))
+                                    .map(a => [a.name, a.value])
+                            ),
+                            ariaLabel: el.getAttribute('aria-label') || '',
+                        });
+                    });
+
+                    return results;
+                }
+            """)
+
+            if broad_slots:
+                logger.info("Broad DOM scan found %d elements with time text", len(broad_slots))
+                # Save for diagnostics
+                self._save_diag_json(
+                    f"broad_dom_{target_date.isoformat()}.json", broad_slots
+                )
+                for el in broad_slots:
+                    parsed = self._parse_dom_element_broad(el, target_date)
+                    if parsed:
+                        slots.append(parsed)
+                        strategy_counts["broad_dom"] += 1
+        except Exception as e:
+            logger.warning("Broad DOM scan error: %s", e)
 
         # Strategy 3: Full page text analysis for time patterns
         if not slots:
             try:
                 page_text = await page.inner_text("body")
                 text_slots = self._extract_times_from_text(page_text, target_date)
+                strategy_counts["text"] = len(text_slots)
                 slots.extend(text_slots)
             except Exception:
                 pass
 
+        logger.info(
+            "DOM extraction for %s: redux=%d targeted=%d broad=%d text=%d total=%d",
+            target_date.isoformat(),
+            strategy_counts["redux"], strategy_counts["targeted_dom"],
+            strategy_counts["broad_dom"], strategy_counts["text"], len(slots),
+        )
+
         return slots
 
+    # ── DOM element parsers ──────────────────────────────────────────
+
     def _parse_dom_element(self, el: dict, target_date: date) -> dict | None:
-        """Parse a DOM element into a slot dict."""
+        """Parse a DOM element into a slot dict (targeted, strict matching)."""
         text = el.get("text", "")
         if not text:
             return None
 
         # Extract time from text — require full "H:MM AM/PM" format
-        # This prevents matching bare numbers like "8" or timestamps without AM/PM
         time_match = re.search(
             r'(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)', text
         )
@@ -418,65 +734,41 @@ class AvailabilityChecker:
         if any(x in class_name for x in ["unavailable", "booked", "disabled", "closed"]):
             return None
 
-        # Build court name regex early — needed for positive signal check
-        court_re = re.compile(
-            r'((?:McFetridge\s+)?Tennis\s+Ct\s*\d+|Court\s*\d+|Tennis\s+Court\s*\d+|Ct\s*\d+)',
-            re.IGNORECASE,
-        )
-
         # Require positive availability signal — at least one must be true:
-        # 1. Class suggests availability (available, bookable, open, reserv)
-        # 2. Data attribute indicates availability
-        # 3. Court name found in element text or parent text
         positive_class_signals = ["available", "bookable", "open", "reserv"]
         has_positive_class = any(s in class_name for s in positive_class_signals)
         has_positive_data = any(
             "available" in str(v).lower() or v.lower() == "true"
             for v in el.get("dataAttrs", {}).values()
         )
-        has_court_in_text = bool(court_re.search(text))
-        has_court_in_parent = bool(court_re.search(el.get("parentText", "")))
-        has_court_in_aria = bool(court_re.search(el.get("ariaLabel", "")))
+        has_court_in_text = bool(FACILITY_RE.search(text))
+        has_court_in_parent = bool(FACILITY_RE.search(el.get("parentText", "")))
+        has_court_in_aria = bool(FACILITY_RE.search(el.get("ariaLabel", "")))
 
         has_court_anywhere = has_court_in_text or has_court_in_parent or has_court_in_aria
         has_availability_signal = has_positive_class or has_positive_data
 
-        # Must have court context — no court association = not a bookable slot
+        # Must have court context
         if not has_court_anywhere:
             return None
-        # If court is only in parent (not in element text or aria), also require
-        # a positive availability signal to avoid matching navigation/headers
         if not has_court_in_text and not has_court_in_aria and not has_availability_signal:
             return None
 
         # Extract court name from text, parentText, ariaLabel, data-attrs
         court_name = ""
-        court_match = court_re.search(text)
-        if court_match:
-            court_name = court_match.group(1)
-
-        if not court_name:
-            parent_text = el.get("parentText", "")
-            if parent_text:
-                court_match = court_re.search(parent_text)
-                if court_match:
-                    court_name = court_match.group(1)
-
-        if not court_name:
-            aria = el.get("ariaLabel", "")
-            if aria:
-                court_match = court_re.search(aria)
-                if court_match:
-                    court_name = court_match.group(1)
+        for source in [text, el.get("parentText", ""), el.get("ariaLabel", "")]:
+            match = FACILITY_RE.search(source)
+            if match:
+                court_name = match.group(1)
+                break
 
         if not court_name:
             for attr_val in el.get("dataAttrs", {}).values():
-                court_match = court_re.search(str(attr_val))
-                if court_match:
-                    court_name = court_match.group(1)
+                match = FACILITY_RE.search(str(attr_val))
+                if match:
+                    court_name = match.group(1)
                     break
 
-        # Reject elements where no court name could be extracted
         if not court_name:
             logger.debug(
                 "DOM element rejected: no court_name found (time=%s, class=%s)",
@@ -493,27 +785,81 @@ class AvailabilityChecker:
             "raw": el,
         }
 
+    def _parse_dom_element_broad(self, el: dict, target_date: date) -> dict | None:
+        """Parse DOM element with broader facility name matching (Strategy 2b)."""
+        text = el.get("text", "")
+        if not text:
+            return None
+
+        # Extract time
+        time_match = re.search(r'(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)', text)
+        if not time_match:
+            return None
+
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2))
+        ampm = time_match.group(3).upper()
+
+        if ampm == "PM" and hour != 12:
+            hour += 12
+        elif ampm == "AM" and hour == 12:
+            hour = 0
+
+        time_str = f"{hour:02d}:{minute:02d}"
+
+        # Check for negative signals in class
+        class_name = (el.get("className", "") or "").lower()
+        if any(x in class_name for x in ["unavailable", "booked", "disabled", "closed"]):
+            return None
+
+        # Search for facility name in text, contextText, ariaLabel
+        court_name = ""
+        for source in [text, el.get("contextText", ""), el.get("ariaLabel", "")]:
+            match = FACILITY_RE.search(source or "")
+            if match:
+                court_name = match.group(1).strip()
+                break
+
+        # If no regex match, try generic name extraction from context
+        if not court_name:
+            context = el.get("contextText", "")
+            name_match = re.search(
+                r'([\w\s]+(?:Court|Ct|Field|Room|Lane|Machine)\s*\d*)',
+                context or "", re.IGNORECASE
+            )
+            if name_match:
+                court_name = name_match.group(1).strip()
+
+        if not court_name:
+            return None
+
+        return {
+            "date": target_date.isoformat(),
+            "time": time_str,
+            "court_name": court_name,
+            "day_of_week": target_date.strftime("%A"),
+            "duration_minutes": 60,
+            "raw": {"source": "broad_dom_scan"},
+        }
+
+    # ── Text extraction fallback ─────────────────────────────────────
+
     def _extract_times_from_text(self, text: str, target_date: date) -> list[dict]:
         """Extract time slots from raw page text using regex patterns."""
         slots = []
-        # Look for time patterns like "6:00 PM - Available" or similar
         patterns = [
-            r'(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))\s*[-–]\s*(?:available|open|book)',
-            r'(?:available|open)\s*[-–:]\s*(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))',
+            r'(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))\s*[-\u2013]\s*(?:available|open|book)',
+            r'(?:available|open)\s*[-\u2013:]\s*(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))',
         ]
-        court_re = re.compile(
-            r'((?:McFetridge\s+)?Tennis\s+Ct\s*\d+|Court\s*\d+|Tennis\s+Court\s*\d+|Ct\s*\d+)',
-            re.IGNORECASE,
-        )
         for pattern in patterns:
             for match in re.finditer(pattern, text, re.IGNORECASE):
                 time_str = match.group(1)
                 # Look for court name near the time match (wider context)
-                context = text[max(0, match.start() - 200):match.end() + 200]
-                court_match = court_re.search(context)
-                # REQUIRE court name for text-extracted results to avoid false positives
+                context = text[max(0, match.start() - 300):match.end() + 300]
+                court_match = FACILITY_RE.search(context)
+                # REQUIRE facility name for text-extracted results
                 if not court_match:
-                    logger.debug("Text extraction: skipping time %s (no court name nearby)", time_str)
+                    logger.debug("Text extraction: skipping time %s (no facility name nearby)", time_str)
                     continue
                 court_name = court_match.group(1)
                 slots.append({
@@ -525,6 +871,8 @@ class AvailabilityChecker:
                     "raw": {"source": "text_extraction", "match": time_str},
                 })
         return slots
+
+    # ── Redux state extraction ───────────────────────────────────────
 
     def _extract_from_state(self, state: dict, target_date: date) -> list[dict]:
         """Recursively search Redux state for availability data."""
@@ -552,60 +900,203 @@ class AvailabilityChecker:
                     slots.extend(self._extract_from_state(item, target_date))
         return slots
 
+    # ── API response parsing ─────────────────────────────────────────
+
     def _parse_captured_responses(self) -> list[dict]:
         """Parse captured API responses for availability data."""
         slots = []
+
         for resp in self.captured_responses:
             data = resp.get("data")
             if not data:
                 continue
 
-            # Try to extract slots from various response formats
-            items = []
-            if isinstance(data, list):
-                items = data
-            elif isinstance(data, dict):
-                # Common API response wrappers
-                for key in ["data", "results", "items", "slots", "schedules",
-                            "availability", "facilities", "timeSlots"]:
-                    if key in data and isinstance(data[key], list):
-                        items = data[key]
-                        break
-
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                # Try to extract time and availability info
-                time_val = (
-                    item.get("time") or item.get("startTime") or
-                    item.get("start_time") or item.get("timeSlot") or ""
+            # Fast path: known field names in flat list structures
+            fast_slots = self._parse_response_fast(data)
+            if fast_slots:
+                logger.info(
+                    "Fast-path parsed %d slots from %s",
+                    len(fast_slots), resp.get("url", "?"),
                 )
-                date_val = (
-                    item.get("date") or item.get("startDate") or
-                    item.get("start_date") or ""
-                )
-                available = item.get("available", item.get("isAvailable", True))
+                slots.extend(fast_slots)
+            else:
+                # Fallback: deep recursive extraction
+                deep_slots = self._deep_extract_slots(data)
+                if deep_slots:
+                    logger.info(
+                        "Deep extraction found %d potential slots from %s",
+                        len(deep_slots), resp.get("url", "?"),
+                    )
+                    slots.extend(deep_slots)
 
-                court_name_val = str(
-                    item.get("facility", item.get("court", item.get("name", "")))
-                ).strip()
-                # Skip API items without court identification
-                if not court_name_val:
-                    continue
+        logger.info(
+            "API parsing: %d total slots from %d captured responses",
+            len(slots), len(self.captured_responses),
+        )
 
-                if time_val and available:
-                    slots.append({
-                        "date": str(date_val),
-                        "time": str(time_val),
-                        "court_name": court_name_val,
-                        "day_of_week": "",
-                        "duration_minutes": item.get("duration", 60),
-                        "raw": item,
-                    })
+        # Save extraction diagnostics
+        if self.captured_responses:
+            self._save_diag_json("api_extraction.json", {
+                "total_responses": len(self.captured_responses),
+                "total_slots_found": len(slots),
+                "slots": [
+                    {"time": s["time"], "date": s["date"], "court_name": s["court_name"]}
+                    for s in slots[:100]
+                ],
+            })
 
         return slots
+
+    def _parse_response_fast(self, data) -> list[dict]:
+        """Fast path: parse API response with known field name conventions."""
+        slots = []
+
+        items = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            for key in ["data", "results", "items", "slots", "schedules",
+                        "availability", "facilities", "timeSlots"]:
+                if key in data and isinstance(data[key], list):
+                    items = data[key]
+                    break
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            time_val = (
+                item.get("time") or item.get("startTime") or
+                item.get("start_time") or item.get("timeSlot") or ""
+            )
+            date_val = (
+                item.get("date") or item.get("startDate") or
+                item.get("start_date") or ""
+            )
+            available = item.get("available", item.get("isAvailable", True))
+
+            court_name_val = str(
+                item.get("facility", item.get("court", item.get("name", "")))
+            ).strip()
+            if not court_name_val:
+                continue
+
+            if time_val and available:
+                slots.append({
+                    "date": str(date_val),
+                    "time": str(time_val),
+                    "court_name": court_name_val,
+                    "day_of_week": "",
+                    "duration_minutes": item.get("duration", 60),
+                    "raw": item,
+                })
+
+        return slots
+
+    def _deep_extract_slots(self, data, path: str = "root", depth: int = 0) -> list[dict]:
+        """Recursively search JSON for objects that look like availability data.
+
+        Instead of requiring specific field names, look for dicts containing
+        time-like values, date-like values, and facility/resource name strings.
+        """
+        if depth > 10:
+            return []
+
+        slots = []
+
+        if isinstance(data, dict):
+            # Check if THIS dict looks like a slot
+            time_val = None
+            date_val = None
+            name_val = None
+            available = True
+
+            for key, value in data.items():
+                val_str = str(value).strip()
+                key_lower = key.lower()
+
+                # Time detection
+                if time_val is None and _TIME_RE.search(val_str) and len(val_str) < 30:
+                    time_val = val_str
+
+                # Date detection
+                if date_val is None and _DATE_RE.search(val_str) and len(val_str) < 30:
+                    date_val = val_str
+
+                # Facility name detection
+                name_keys = ["name", "facility", "resource", "court", "location",
+                             "resourcename", "facilityname", "description", "title"]
+                if name_val is None and any(nk in key_lower for nk in name_keys):
+                    if isinstance(value, str) and value.strip():
+                        name_val = value.strip()
+
+                # Availability detection
+                avail_keys = ["available", "isavailable", "status", "bookable"]
+                if any(ak in key_lower for ak in avail_keys):
+                    if isinstance(value, bool):
+                        available = value
+                    elif isinstance(value, str):
+                        available = value.lower() not in (
+                            "false", "unavailable", "booked", "closed"
+                        )
+
+            if time_val and available:
+                slots.append({
+                    "date": date_val or "",
+                    "time": time_val,
+                    "court_name": name_val or "",
+                    "day_of_week": "",
+                    "duration_minutes": 60,
+                    "raw": {"source": "deep_extraction", "path": path},
+                })
+
+            # Recurse into all values
+            for key, value in data.items():
+                if isinstance(value, (dict, list)):
+                    slots.extend(
+                        self._deep_extract_slots(value, f"{path}.{key}", depth + 1)
+                    )
+
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                if isinstance(item, (dict, list)):
+                    slots.extend(
+                        self._deep_extract_slots(item, f"{path}[{i}]", depth + 1)
+                    )
+
+        return slots
+
+    # ── Helpers ──────────────────────────────────────────────────────
 
     def _get_target_dates(self) -> list[date]:
         """Get the list of dates to check (next N days)."""
         today = date.today()
         return [today + timedelta(days=i) for i in range(1, self.settings.days_ahead + 1)]
+
+    def get_api_context(self) -> dict:
+        """Return discovered API endpoints, cookies, and headers for the lightweight poller.
+
+        Call this after check_availability() completes. The returned dict contains
+        everything needed to replay the API calls without a browser.
+        """
+        endpoints = []
+        for resp in self.captured_responses:
+            url = resp["url"]
+            data = resp.get("data")
+            # Check if response looks like it contains slot/availability data
+            data_str = json.dumps(data)[:2000].lower() if data else ""
+            has_slots = any(k in data_str for k in [
+                "timeslot", "starttime", "start_time", "available",
+                "schedule", "facility", "court",
+            ])
+            endpoints.append({
+                "url": url,
+                "method": "GET",
+                "headers": self.captured_request_headers.get(url, {}),
+                "has_slot_data": has_slots,
+            })
+
+        return {
+            "endpoints": endpoints,
+            "cookies": self._browser_cookies,
+            "discovered_at": dt.utcnow().isoformat(),
+        }

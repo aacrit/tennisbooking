@@ -17,10 +17,10 @@ import pytz
 
 from config import Settings
 from scraper.checker import AvailabilityChecker
-from scraper.parser import filter_slots
+from scraper.parser import filter_slots, filter_other_slots
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG if os.environ.get("SCRAPER_DEBUG") else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
@@ -111,8 +111,9 @@ async def main():
 
     old_status = load_previous_status()
 
+    diag_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diagnostics")
     try:
-        checker = AvailabilityChecker(settings)
+        checker = AvailabilityChecker(settings, diag_dir=diag_dir)
         raw_slots = await checker.check_availability()
         filtered = filter_slots(raw_slots, settings)
     except Exception as e:
@@ -126,6 +127,8 @@ async def main():
             "calendar": calendar,
             "total_slots": 0,
             "changes": compute_changes(old_status, calendar, now_ct),
+            "other_calendar": build_calendar([]),
+            "other_total_slots": 0,
         })
         # Don't sys.exit(1) — let the workflow commit the failure status
         # so the dashboard shows when the last attempt was made
@@ -136,6 +139,11 @@ async def main():
     total_slots = sum(len(day["slots"]) for day in calendar)
     changes = compute_changes(old_status, calendar, now_ct)
 
+    # Non-tennis slots (pickleball, ball machines, etc.)
+    other_filtered = filter_other_slots(raw_slots, settings)
+    other_calendar = build_calendar(other_filtered)
+    other_total_slots = sum(len(day["slots"]) for day in other_calendar)
+
     write_json({
         "last_scan_time": now_ct,
         "last_scan_success": True,
@@ -143,28 +151,80 @@ async def main():
         "calendar": calendar,
         "total_slots": total_slots,
         "changes": changes,
+        "other_calendar": other_calendar,
+        "other_total_slots": other_total_slots,
     })
 
     # Send WhatsApp notification for newly opened slots
+    instance_id = os.environ.get("GREEN_API_INSTANCE_ID", "")
+    api_token = os.environ.get("GREEN_API_TOKEN", "")
+    chat_id = os.environ.get("WHATSAPP_CHAT_ID", "")
+    wa_configured = bool(instance_id and api_token and chat_id)
+
     opened = changes.get("opened", [])
     if opened:
-        instance_id = os.environ.get("GREEN_API_INSTANCE_ID", "")
-        api_token = os.environ.get("GREEN_API_TOKEN", "")
-        chat_id = os.environ.get("WHATSAPP_CHAT_ID", "")
-        if instance_id and api_token and chat_id:
+        if wa_configured:
             from notifications.whatsapp import send_whatsapp, format_slots_message
             msg = format_slots_message(opened)
-            send_whatsapp(instance_id, api_token, chat_id, msg)
+            ok = send_whatsapp(instance_id, api_token, chat_id, msg)
+            logger.info("WhatsApp sent=%s for %d opened slots", ok, len(opened))
         else:
-            logger.debug("WhatsApp not configured, skipping notification")
+            logger.warning("WhatsApp NOT configured — skipping notification for %d opened slots", len(opened))
 
     opened_count = len(changes.get("opened", []))
     closed_count = len(changes.get("closed", []))
+    logger.info(
+        "DIAGNOSTIC: raw=%d filtered=%d opened=%d closed=%d whatsapp_configured=%s",
+        len(raw_slots), len(filtered), opened_count, closed_count, wa_configured,
+    )
     logger.info(
         "Done: %d slots across %d days (changes: +%d opened, -%d closed)",
         total_slots, len(calendar), opened_count, closed_count,
     )
 
+    # Save API context for potential use by fast_scan.py
+    api_context = checker.get_api_context()
+    api_context_path = os.path.join(OUT_DIR, "api_context.json")
+    os.makedirs(OUT_DIR, exist_ok=True)
+    with open(api_context_path, "w") as f:
+        json.dump(api_context, f, indent=2)
+    logger.info("Saved API context: %d endpoints", len(api_context.get("endpoints", [])))
+
+
+def send_test_whatsapp():
+    """Send a test WhatsApp message to verify Green API credentials."""
+    from notifications.whatsapp import send_whatsapp, format_slots_message
+
+    instance_id = os.environ.get("GREEN_API_INSTANCE_ID", "")
+    api_token = os.environ.get("GREEN_API_TOKEN", "")
+    chat_id = os.environ.get("WHATSAPP_CHAT_ID", "")
+
+    if not all([instance_id, api_token, chat_id]):
+        logger.error(
+            "Cannot send test: missing GREEN_API_INSTANCE_ID, GREEN_API_TOKEN, "
+            "or WHATSAPP_CHAT_ID environment variables"
+        )
+        sys.exit(1)
+
+    mock_slots = [
+        {"date": "2026-02-25", "time": "6:00 PM", "court_name": "Tennis Ct 1",
+         "detected_at": datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CT")},
+        {"date": "2026-02-25", "time": "7:00 PM", "court_name": "Tennis Ct 3",
+         "detected_at": datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CT")},
+    ]
+
+    msg = format_slots_message(mock_slots)
+    logger.info("Sending test WhatsApp message to %s...", chat_id)
+    ok = send_whatsapp(instance_id, api_token, chat_id, msg)
+    if ok:
+        logger.info("Test message sent successfully!")
+    else:
+        logger.error("Test message FAILED — check credentials and logs above")
+        sys.exit(1)
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    if "--test-whatsapp" in sys.argv:
+        send_test_whatsapp()
+    else:
+        asyncio.run(main())

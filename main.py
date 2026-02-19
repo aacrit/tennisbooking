@@ -1,12 +1,14 @@
 """
 Tennis Court Availability Monitor - McFetridge Sports Center
 
-Single-process app: FastAPI dashboard + APScheduler + Playwright scraper.
+Single-process app: FastAPI dashboard + APScheduler + Playwright scraper
++ lightweight API poller for real-time slot detection.
 """
 import asyncio
 import logging
 import time as _time
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 import pytz
 import uvicorn
@@ -15,10 +17,10 @@ from apscheduler.triggers.cron import CronTrigger
 
 import db
 from config import Settings
-# [GITHUB-PAGES] Email notifications disabled for static deployment
-# from notifications.emailer import send_availability_email
+from notifications.whatsapp import send_whatsapp, format_slots_message
 from scraper.checker import AvailabilityChecker
-from scraper.parser import filter_slots
+from scraper.api_poller import APIPoller
+from scraper.parser import filter_slots, filter_other_slots
 from web.app import app, set_check_fn
 
 # Logging
@@ -32,19 +34,31 @@ logger = logging.getLogger("tennismonitor")
 settings = Settings()
 CT = pytz.timezone("America/Chicago")
 
-# Track running state to prevent overlapping scans
+# Concurrency locks
 _scan_lock = asyncio.Lock()
+_poll_lock = asyncio.Lock()
+
+# Module-level state for the API poller
+_api_poller: APIPoller | None = None
+
+# Notification cooldown: slot_key -> last notification timestamp
+_last_notification_time: dict[tuple, float] = {}
 
 
-async def run_check() -> int:
-    """Core scan function: scrape → filter → notify. Returns slot count."""
+async def run_full_scan() -> int:
+    """Full Playwright scan: scrape, filter, detect changes, notify.
+
+    Also refreshes the API context for the lightweight poller.
+    """
+    global _api_poller
+
     if _scan_lock.locked():
-        logger.info("Scan already in progress, skipping")
+        logger.info("Full scan already in progress, skipping")
         return 0
 
     async with _scan_lock:
         start = _time.time()
-        logger.info("Starting availability check...")
+        logger.info("Starting full Playwright scan...")
 
         try:
             checker = AvailabilityChecker(settings)
@@ -52,67 +66,230 @@ async def run_check() -> int:
             filtered = filter_slots(raw_slots, settings)
             duration = _time.time() - start
 
+            # Also filter non-tennis slots (pickleball, ball machines, etc.)
+            other_filtered = filter_other_slots(raw_slots, settings)
+
             scan_id = await db.record_scan(True, None, len(filtered), duration)
             if filtered:
                 await db.save_slots(scan_id, filtered)
+            if other_filtered:
+                await db.save_slots(scan_id, other_filtered)
 
-            # [GITHUB-PAGES] Email notifications disabled for static deployment
-            # previously_notified = await db.get_notified_slot_keys()
-            # new_slots = []
-            # for slot in filtered:
-            #     key = (slot["date"], slot["time"], slot.get("court_name", ""))
-            #     if key not in previously_notified:
-            #         new_slots.append(slot)
-            #
-            # if new_slots:
-            #     logger.info("Found %d NEW slots, sending notification", len(new_slots))
-            #     count = len(new_slots)
-            #     subject = f"Tennis Court{'s' if count != 1 else ''} Available! ({count} slot{'s' if count != 1 else ''})"
-            #     success = await send_availability_email(settings, new_slots)
-            #     await db.record_notification(
-            #         settings.notify_email, subject, new_slots, success
-            #     )
-            #     if success:
-            #         await db.mark_slots_notified(new_slots)
-            # else:
-            #     logger.info("No new slots (found %d total, all previously notified)", len(filtered))
+            # Change detection via current_slots table (tennis only)
+            current_set = {
+                (s["date"], s["time"], s.get("court_name", ""))
+                for s in filtered
+            }
+            opened, closed = await db.update_current_slots(
+                current_set, scan_id, "playwright"
+            )
+
+            # Notify on newly opened slots
+            if opened:
+                await _notify_opened_slots(opened)
+
+            # Refresh API context for the lightweight poller
+            if settings.api_poll_enabled:
+                api_context = checker.get_api_context()
+                ep_count = len(api_context.get("endpoints", []))
+                slot_eps = sum(
+                    1 for e in api_context.get("endpoints", [])
+                    if e.get("has_slot_data")
+                )
+                logger.info(
+                    "API discovery: %d endpoints (%d with slot data)",
+                    ep_count, slot_eps,
+                )
+                if _api_poller is None:
+                    _api_poller = APIPoller(api_context, settings.days_ahead)
+                else:
+                    _api_poller.update_context(api_context)
 
             logger.info(
-                "Check complete: %d raw, %d filtered, %.1fs",
-                len(raw_slots), len(filtered), duration,
+                "DIAGNOSTIC: full_scan raw=%d filtered=%d opened=%d closed=%d duration=%.1fs",
+                len(raw_slots), len(filtered), len(opened), len(closed), duration,
             )
             return len(filtered)
 
         except Exception as e:
             duration = _time.time() - start
-            logger.exception("Check failed: %s", e)
+            logger.exception("Full scan failed: %s", e)
             await db.record_scan(False, str(e), 0, duration)
             return 0
+
+
+async def run_api_poll() -> int:
+    """Lightweight API poll for fast change detection (<1 second)."""
+    global _api_poller
+
+    if _api_poller is None:
+        return 0
+
+    if _poll_lock.locked():
+        return 0
+
+    async with _poll_lock:
+        start = _time.time()
+        try:
+            # Run the synchronous poll in a thread to avoid blocking the event loop
+            loop = asyncio.get_event_loop()
+            raw_slots = await loop.run_in_executor(None, _api_poller.poll)
+
+            if not raw_slots:
+                if _api_poller.needs_rediscovery:
+                    logger.info("API poller needs rediscovery, triggering full scan")
+                    asyncio.create_task(run_full_scan())
+                return 0
+
+            filtered = filter_slots(raw_slots, settings)
+            other_filtered = filter_other_slots(raw_slots, settings)
+            duration = _time.time() - start
+
+            scan_id = await db.record_scan(True, None, len(filtered), duration)
+            if filtered:
+                await db.save_slots(scan_id, filtered)
+            if other_filtered:
+                await db.save_slots(scan_id, other_filtered)
+
+            current_set = {
+                (s["date"], s["time"], s.get("court_name", ""))
+                for s in filtered
+            }
+            opened, closed = await db.update_current_slots(
+                current_set, scan_id, "api_poll"
+            )
+
+            if opened:
+                await _notify_opened_slots(opened)
+
+            if filtered or opened or closed:
+                logger.info(
+                    "DIAGNOSTIC: api_poll filtered=%d opened=%d closed=%d duration=%.2fs",
+                    len(filtered), len(opened), len(closed), duration,
+                )
+            else:
+                logger.debug("API poll: 0 filtered, %.2fs", duration)
+
+            return len(filtered)
+
+        except Exception as e:
+            logger.warning("API poll failed: %s", e)
+            return 0
+
+
+async def _notify_opened_slots(opened: set[tuple]):
+    """Send WhatsApp notification for newly opened slots with cooldown."""
+    now = _time.time()
+    now_ct = datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CT")
+
+    # Filter out recently notified slots (cooldown)
+    slots_to_notify = []
+    for d, t, c in sorted(opened):
+        key = (d, t, c)
+        last_notified = _last_notification_time.get(key, 0)
+        if now - last_notified > settings.notify_cooldown_seconds:
+            slots_to_notify.append({
+                "date": d, "time": t, "court_name": c, "detected_at": now_ct,
+            })
+            _last_notification_time[key] = now
+
+    if not slots_to_notify:
+        return
+
+    logger.info("Notifying about %d new slots via WhatsApp", len(slots_to_notify))
+
+    instance_id = settings.green_api_instance_id
+    api_token = settings.green_api_token
+    chat_id = settings.whatsapp_chat_id
+
+    if instance_id and api_token and chat_id:
+        msg = format_slots_message(slots_to_notify)
+        success = send_whatsapp(instance_id, api_token, chat_id, msg)
+        await db.record_notification(
+            "whatsapp", chat_id, slots_to_notify, success,
+        )
+    else:
+        logger.warning(
+            "WhatsApp not configured (missing GREEN_API_INSTANCE_ID / "
+            "GREEN_API_TOKEN / WHATSAPP_CHAT_ID)"
+        )
+
+
+async def _burst_poll_loop():
+    """Background loop for aggressive polling during the 7 AM CT window.
+
+    Polls every api_poll_peak_seconds (default 15s) from 6:55-7:10 AM CT.
+    Sleeps between burst windows.
+    """
+    while True:
+        try:
+            now = datetime.now(CT)
+            in_burst = (
+                (now.hour == 6 and now.minute >= 55) or
+                (now.hour == 7 and now.minute <= 10)
+            )
+
+            if in_burst:
+                await run_api_poll()
+                await asyncio.sleep(settings.api_poll_peak_seconds)
+            else:
+                # Sleep until next check (60s), the scheduler handles non-burst polls
+                await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning("Burst poll loop error: %s", e)
+            await asyncio.sleep(30)
 
 
 def setup_scheduler() -> AsyncIOScheduler:
     """Configure scan schedule in Central Time."""
     scheduler = AsyncIOScheduler(timezone=CT)
 
-    # Peak: every 5 minutes from 6:50 AM to 8:00 AM CT (catch 7 AM new slots)
+    # === PLAYWRIGHT FULL SCANS ===
+
+    # Peak: every 15 minutes from 6 AM to 8 AM CT
     scheduler.add_job(
-        run_check,
-        CronTrigger(hour="6-7", minute="*/5", timezone=CT),
-        id="peak_scan",
-        name="Peak scan (6:50-8 AM CT)",
+        run_full_scan,
+        CronTrigger(hour="6-7", minute="*/15", timezone=CT),
+        id="peak_full_scan",
+        name="Peak full scan (6-8 AM CT)",
         replace_existing=True,
         misfire_grace_time=120,
     )
 
-    # Normal: every 15 minutes from 8 AM to midnight CT (catch cancellations)
+    # Normal: every 30 minutes from 8 AM to midnight CT
     scheduler.add_job(
-        run_check,
-        CronTrigger(hour="8-23", minute="*/15", timezone=CT),
-        id="normal_scan",
-        name="Normal scan (8 AM - midnight CT)",
+        run_full_scan,
+        CronTrigger(hour="8-23", minute="0,30", timezone=CT),
+        id="normal_full_scan",
+        name="Normal full scan (8 AM - midnight CT)",
         replace_existing=True,
         misfire_grace_time=120,
     )
+
+    # === LIGHTWEIGHT API POLLS ===
+
+    if settings.api_poll_enabled:
+        # Peak hours: every 30 seconds from 6-8 AM CT
+        scheduler.add_job(
+            run_api_poll,
+            CronTrigger(hour="6-7", minute="*", second="0,30", timezone=CT),
+            id="peak_api_poll",
+            name="Peak API poll (every 30s, 6-8 AM CT)",
+            replace_existing=True,
+            misfire_grace_time=10,
+        )
+
+        # Normal hours: every 2 minutes from 8 AM to midnight CT
+        scheduler.add_job(
+            run_api_poll,
+            CronTrigger(hour="8-23", minute="*/2", timezone=CT),
+            id="normal_api_poll",
+            name="Normal API poll (every 2 min, 8 AM - midnight CT)",
+            replace_existing=True,
+            misfire_grace_time=30,
+        )
 
     # Daily cleanup of old data
     scheduler.add_job(
@@ -133,17 +310,37 @@ async def lifespan(app):
     await db.init_db(settings.db_path)
 
     # Wire up the scan function for the "Scan Now" button
-    set_check_fn(run_check)
+    set_check_fn(run_full_scan)
 
     scheduler = setup_scheduler()
     scheduler.start()
     logger.info("Scheduler started with %d jobs", len(scheduler.get_jobs()))
 
-    # Run an initial check on startup
-    asyncio.create_task(run_check())
+    # Start burst poll loop for 7 AM window
+    burst_task = None
+    if settings.api_poll_enabled:
+        burst_task = asyncio.create_task(_burst_poll_loop())
+        logger.info("Burst poll loop started (6:55-7:10 AM CT, every %ds)", settings.api_poll_peak_seconds)
+
+    # Run an initial full scan on startup (also discovers API endpoints)
+    asyncio.create_task(run_full_scan())
+
+    # Log WhatsApp configuration status
+    wa_configured = bool(
+        settings.green_api_instance_id and
+        settings.green_api_token and
+        settings.whatsapp_chat_id
+    )
+    logger.info("WhatsApp notifications: %s", "CONFIGURED" if wa_configured else "NOT CONFIGURED")
 
     yield
 
+    if burst_task:
+        burst_task.cancel()
+        try:
+            await burst_task
+        except asyncio.CancelledError:
+            pass
     scheduler.shutdown(wait=False)
     logger.info("Shutting down")
 

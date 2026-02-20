@@ -12,9 +12,11 @@ from config import Settings
 
 logger = logging.getLogger(__name__)
 
-# Only allow McFetridge Tennis courts 1-6 (exclude pickleball, ball machine, etc.)
+# Allow McFetridge Tennis courts 1-6 and common name variations from the scraper
+# Matches: "Tennis Ct 1", "McFetridge Tennis Ct 1", "McFetridge Tennis Court 3",
+#           "McFetridge Tennis Ct 1 Court Time", etc.
 ALLOWED_COURTS_RE = re.compile(
-    r'(McFetridge\s+)?Tennis\s+(Ct|Court)\s*0?[1-6]\b',
+    r'(?:McFetridge\s+)?Tennis\s+(?:Ct|Court)\s*0?[1-6]\b',
     re.IGNORECASE,
 )
 

@@ -427,6 +427,36 @@ class AvailabilityChecker:
 
     # ── Activity search approach (PRIMARY) ─────────────────────────
 
+    @staticmethod
+    def _clean_activity_name(name: str) -> str:
+        """Extract a clean court/activity identifier from search result text.
+
+        e.g. "McFetridge Tennis Ct 1 Court Time Reservation Feb 20-25 2026..."
+             → "McFetridge Tennis Ct 1"
+        """
+        if not name:
+            return ""
+
+        # Try FACILITY_RE first (Tennis Ct 1, Pickleball Court, etc.)
+        match = FACILITY_RE.search(name)
+        if match:
+            return match.group(1).strip()
+
+        # Try a broader pattern: "McFetridge <something> Court Time"
+        match = re.search(
+            r'(McFetridge\s+[\w\s]+?)(?:\s+Court\s+Time|\s+Reservation|\s+Res\b)',
+            name, re.IGNORECASE,
+        )
+        if match:
+            return match.group(1).strip()
+
+        # Strip common suffixes and keep meaningful prefix
+        cleaned = re.sub(
+            r'\s*(?:Court\s+Time|Reservation|Res\b|Registration).*$',
+            '', name, flags=re.IGNORECASE,
+        ).strip()
+        return cleaned[:60] or name[:60]
+
     async def _check_activity_search(self, page: Page) -> list[dict]:
         """Search for McFetridge activities and extract availability.
 
@@ -506,6 +536,9 @@ class AvailabilityChecker:
         logger.info("Found %d activity links/cards", len(activity_links))
         self._save_diag_json("activity_links.json", activity_links)
 
+        # Track API responses from search page (before visiting activity details)
+        search_response_count = len(self.captured_responses)
+
         # Visit each activity detail page to get availability
         for link in activity_links[:10]:
             href = link.get("href", "")
@@ -513,7 +546,15 @@ class AvailabilityChecker:
             if not href or not href.startswith("http"):
                 continue
 
-            logger.info("Checking activity: %s", name[:80])
+            # Extract a clean court/activity identifier from the link text
+            clean_name = self._clean_activity_name(name)
+            logger.info(
+                "Checking activity: %s → clean_name=%s", name[:80], clean_name,
+            )
+
+            # Track which API responses belong to THIS activity page
+            responses_before = len(self.captured_responses)
+
             try:
                 await page.goto(href, wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_load_state("networkidle", timeout=30000)
@@ -527,19 +568,31 @@ class AvailabilityChecker:
                 target_dates = self._get_target_dates()
                 for td in target_dates:
                     page_slots = await self._extract_slots_from_dom(page, td)
-                    # Use activity name as court_name fallback
+                    # ALWAYS override court_name with the activity name
+                    # (DOM extraction produces garbled names; activity name is reliable)
                     for s in page_slots:
-                        if not s.get("court_name"):
-                            s["court_name"] = name
+                        s["court_name"] = clean_name
                     slots.extend(page_slots)
+
+                # Parse API responses captured DURING this activity's page load
+                new_responses = self.captured_responses[responses_before:]
+                for resp in new_responses:
+                    per_activity_slots = self._parse_single_response(resp)
+                    for s in per_activity_slots:
+                        s["court_name"] = clean_name
+                    slots.extend(per_activity_slots)
 
             except Exception as e:
                 logger.warning("Error loading activity %s: %s", name[:50], e)
 
-        # Parse any API responses captured during activity browsing
-        api_slots = self._parse_captured_responses()
-        if api_slots:
-            slots.extend(api_slots)
+        # Log the activity name mapping for diagnostics
+        activity_name_map = [
+            {"raw": link.get("text", "")[:100],
+             "clean": self._clean_activity_name(link.get("text", "")),
+             "href": link.get("href", "")}
+            for link in activity_links[:10]
+        ]
+        self._save_diag_json("activity_name_map.json", activity_name_map)
 
         logger.info(
             "Activity search: %d links checked, %d total slots found",
@@ -1086,6 +1139,16 @@ class AvailabilityChecker:
         return slots
 
     # ── API response parsing ─────────────────────────────────────────
+
+    def _parse_single_response(self, resp: dict) -> list[dict]:
+        """Parse a single captured API response for slot data."""
+        data = resp.get("data")
+        if not data:
+            return []
+        fast = self._parse_response_fast(data)
+        if fast:
+            return fast
+        return self._deep_extract_slots(data)
 
     def _parse_captured_responses(self) -> list[dict]:
         """Parse captured API responses for availability data."""

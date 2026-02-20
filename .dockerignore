@@ -1,0 +1,17 @@
+# flyctl launch added from .gitignore
+**\__pycache__
+**\*.pyc
+**\.env
+**\data\*.db
+**\data\*.db-wal
+**\data\*.db-shm
+**\.venv
+**\venv
+**\*.egg-info
+**\dist
+**\build
+**\.pytest_cache
+
+# Ensure GitHub Pages data is tracked
+!**\docs\data\status.json
+fly.toml

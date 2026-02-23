@@ -583,40 +583,37 @@ class TestEndToEndNoEmptyCourts:
 
 
 # ===========================================================================
-# Tests 24-29: Reservation page refactor (groupId=2, single strategy)
+# Tests 24-29: Scraper URL and strategy validation
 # ===========================================================================
 
-class TestReservationPageStrategy:
-    """Verify the scraper uses the quick reservation page at groupId=2."""
+class TestScraperStrategy:
+    """Verify the scraper uses the correct Quick Reserve URL."""
 
-    def test_booking_url_uses_group_id_2(self):
-        """BOOKING_URL constant must use groupId=2."""
-        from scraper.checker import BOOKING_URL
-        assert "groupId=2" in BOOKING_URL
-        assert "groupId=1" not in BOOKING_URL
+    def test_quick_reserve_url_uses_correct_path(self):
+        """QUICK_RESERVE_URL must use the reservation/quick path."""
+        from scraper.checker import QUICK_RESERVE_URL
+        assert "reservation/quick" in QUICK_RESERVE_URL
+        assert "online=true" in QUICK_RESERVE_URL
 
-    def test_config_booking_url_uses_group_id_2(self):
-        """config.py default booking_url must use groupId=2."""
+    def test_config_booking_url_uses_quick_reserve(self):
+        """config.py default booking_url must point to Quick Reserve."""
         s = Settings()
-        assert "groupId=2" in s.booking_url
+        assert "reservation/quick" in s.booking_url
 
-    def test_whatsapp_booking_url_uses_group_id_2(self):
-        """WhatsApp message footer URL must use groupId=2."""
+    def test_whatsapp_booking_url_uses_quick_reserve(self):
+        """WhatsApp message footer URL must point to Quick Reserve."""
         from notifications.whatsapp import BOOKING_URL as WA_URL
-        assert "groupId=2" in WA_URL
-        assert "groupId=1" not in WA_URL
+        assert "reservation/quick" in WA_URL
 
-    def test_activity_search_removed(self):
-        """_check_activity_search method should no longer exist."""
+    def test_quick_reserve_method_exists(self):
+        """_check_quick_reserve method should exist."""
         checker = AvailabilityChecker(Settings())
-        assert not hasattr(checker, '_check_activity_search'), \
-            "_check_activity_search should be removed"
+        assert hasattr(checker, '_check_quick_reserve')
 
-    def test_legacy_portal_removed(self):
-        """_check_legacy_portal method should no longer exist."""
+    def test_activity_search_fallback_exists(self):
+        """_check_activity_search method should exist as fallback."""
         checker = AvailabilityChecker(Settings())
-        assert not hasattr(checker, '_check_legacy_portal'), \
-            "_check_legacy_portal should be removed"
+        assert hasattr(checker, '_check_activity_search')
 
     def test_resource_extraction_exists(self):
         """_extract_resource_names method should exist on the checker."""

@@ -32,10 +32,29 @@ AVAILABILITY_API_PATTERNS = [
     "/enrollment",
 ]
 
-# Quick reservation URL — McFetridge facility reservation page (groupId=2)
-BOOKING_URL = (
+# Quick Reserve URL — the actual court booking path.
+# The legacy quick-reserve SDI page redirects here.  This is the entry point
+# that real users reach when they click "Make a Reservation" on
+# mcfetridgesportscenter.com.
+QUICK_RESERVE_URL = (
     "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
-    "reservation/landing/quick?groupId=2&locale=en-US"
+    "reservation/quick?onlineSiteId=0&from_original_cui=true&online=true"
+)
+
+# Activity search — fallback; searches for tennis court time activities
+ACTIVITY_SEARCH_URL = (
+    "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
+    "activity/search?onlineSiteId=0&locale=en-US"
+    "&activity_select_param=2&activity_keyword=tennis+court+time+mcfetridge"
+    "&viewMode=list"
+)
+
+# Broader activity search — second fallback with just McFetridge keyword
+ACTIVITY_SEARCH_BROAD_URL = (
+    "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
+    "activity/search?onlineSiteId=0&locale=en-US"
+    "&activity_select_param=2&activity_keyword=mcfetridge"
+    "&viewMode=list"
 )
 
 # Facility name regex — only matches known McFetridge facility patterns.
@@ -271,8 +290,15 @@ class AvailabilityChecker:
             page.on("response", self._on_response)
 
             try:
-                # Quick reservation page — shows all McFetridge resources directly
-                all_slots = await self._check_modern_portal(page)
+                # Strategy 1: Quick Reserve page (real booking path)
+                all_slots = await self._check_quick_reserve(page)
+
+                # Strategy 2: Activity search with tennis keywords (fallback)
+                if not all_slots:
+                    logger.info(
+                        "Quick Reserve found 0 slots, trying activity search..."
+                    )
+                    all_slots = await self._check_activity_search(page)
 
             except Exception as e:
                 logger.exception("Scraper error: %s", e)
@@ -308,33 +334,45 @@ class AvailabilityChecker:
 
         return all_slots
 
-    # ── Modern portal ────────────────────────────────────────────────
+    # ── Quick Reserve page ───────────────────────────────────────────
 
-    async def _check_modern_portal(self, page: Page) -> list[dict]:
-        """Navigate the quick reservation page and extract available slots.
+    async def _check_quick_reserve(self, page: Page) -> list[dict]:
+        """Navigate the Quick Reserve page — the real court booking path.
 
-        The quick reservation page (groupId=2) shows all McFetridge resources
-        directly — Tennis Ct01-06, Pickleball, Ball Machines, etc.
-        No facility selection needed; all resources are visible at once.
+        This is the path real users take:
+        mcfetridgesportscenter.com → "Make a Reservation" → ActiveNet Quick Reserve.
+        The page shows a facility search where the user selects McFetridge tennis
+        courts, then picks a date and time.
         """
-        logger.info("Checking quick reservation page: %s", BOOKING_URL)
-        await page.goto(BOOKING_URL, wait_until="domcontentloaded", timeout=30000)
+        logger.info("Checking Quick Reserve page: %s", QUICK_RESERVE_URL)
+        await page.goto(QUICK_RESERVE_URL, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_load_state("networkidle", timeout=30000)
-        await asyncio.sleep(3)
+        await asyncio.sleep(4)
 
-        await self._save_diag(page, "reservation_page_loaded")
-        await self._dump_dom_structure(page, "dom_structure_initial")
+        await self._save_diag(page, "quick_reserve_loaded")
+        await self._dump_dom_structure(page, "dom_quick_reserve")
+
+        # Log the current URL (the SPA may have navigated internally)
+        current_url = page.url
+        logger.info("Quick Reserve page URL after load: %s", current_url)
+
+        # Try to select McFetridge / Tennis from whatever UI is presented
+        await self._try_select_facility(page)
+        await asyncio.sleep(3)
+        await page.wait_for_load_state("networkidle", timeout=15000)
+
+        await self._save_diag(page, "after_facility_select")
 
         slots = []
 
-        # Step 1: Extract resource names from the page
+        # Extract resource names from the page
         resource_names = await self._extract_resource_names(page)
         logger.info(
-            "Found %d resources on reservation page: %s",
+            "Found %d resources on Quick Reserve page: %s",
             len(resource_names), resource_names,
         )
 
-        # Step 2: Iterate through target dates
+        # Iterate through target dates
         target_dates = self._get_target_dates()
         for target_date in target_dates:
             logger.info("Checking date: %s", target_date.isoformat())
@@ -345,7 +383,7 @@ class AvailabilityChecker:
 
             await self._save_diag(page, f"date_{target_date.isoformat()}")
 
-            # Step 3: Extract available slots from DOM
+            # Extract available slots from DOM
             page_slots = await self._extract_slots_from_dom(page, target_date)
 
             # Enrich slots with resource names from the page if needed
@@ -363,11 +401,10 @@ class AvailabilityChecker:
         if api_slots:
             slots.extend(api_slots)
 
-        # Dump DOM structure after all navigation
-        await self._dump_dom_structure(page, "dom_structure_final")
+        await self._dump_dom_structure(page, "dom_quick_reserve_final")
 
         logger.info(
-            "SCRAPER SUMMARY: captured_responses=%d, network_urls=%d, "
+            "QUICK RESERVE SUMMARY: captured_responses=%d, network_urls=%d, "
             "dom_slots=%d, api_slots=%d, total=%d, resources=%d",
             len(self.captured_responses), len(self.all_network_urls),
             len(slots) - len(api_slots), len(api_slots), len(slots),
@@ -375,6 +412,245 @@ class AvailabilityChecker:
         )
 
         return slots
+
+    # ── Activity search (fallback) ───────────────────────────────────
+
+    async def _check_activity_search(self, page: Page) -> list[dict]:
+        """Search for tennis court time activities.
+
+        Fallback strategy: search ActiveNet's activity listing for tennis
+        court time at McFetridge.  First tries a targeted search for
+        'tennis court time mcfetridge', then a broader search.
+        """
+        slots = []
+
+        for label, url in [
+            ("tennis+mcfetridge", ACTIVITY_SEARCH_URL),
+            ("mcfetridge (broad)", ACTIVITY_SEARCH_BROAD_URL),
+        ]:
+            if slots:
+                break  # Already found results with previous search
+
+            logger.info("Activity search [%s]: %s", label, url)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_load_state("networkidle", timeout=30000)
+            await asyncio.sleep(5)
+
+            await self._save_diag(page, f"activity_search_{label}")
+
+            # Find activity links
+            activity_links = await page.evaluate("""
+                () => {
+                    const links = [];
+                    document.querySelectorAll(
+                        'a[href*="/activity/search/detail/"]'
+                    ).forEach(el => {
+                        links.push({
+                            href: el.href,
+                            text: (el.textContent || '').trim().substring(0, 200),
+                        });
+                    });
+                    return links;
+                }
+            """)
+
+            logger.info(
+                "Activity search [%s]: found %d activity links",
+                label, len(activity_links),
+            )
+
+            # Prioritize tennis-related links
+            def _tennis_score(link):
+                text = (link.get("text", "") or "").lower()
+                if "tennis" in text and "ct" in text:
+                    return 0
+                if "court time" in text:
+                    return 1
+                if "tennis" in text:
+                    return 2
+                return 3
+
+            activity_links.sort(key=_tennis_score)
+            self._save_diag_json(f"activity_links_{label}.json", activity_links)
+
+            # Visit each activity detail page (up to 15)
+            for link in activity_links[:15]:
+                href = link.get("href", "")
+                name = link.get("text", "").strip()
+                if not href or not href.startswith("http"):
+                    continue
+
+                # Skip obviously non-tennis activities
+                name_lower = name.lower()
+                if any(skip in name_lower for skip in [
+                    "music", "dance", "gymnastics", "swimming", "hockey",
+                    "skating", "soccer", "basketball", "yoga", "fitness",
+                    "camp", "cooking", "art",
+                ]):
+                    logger.info("Skipping non-tennis activity: %s", name[:60])
+                    continue
+
+                logger.info("Checking activity: %s", name[:80])
+                responses_before = len(self.captured_responses)
+
+                try:
+                    await page.goto(
+                        href, wait_until="domcontentloaded", timeout=30000,
+                    )
+                    await page.wait_for_load_state("networkidle", timeout=30000)
+                    await asyncio.sleep(3)
+
+                    # Extract court name from the activity detail page
+                    court_name = await self._extract_court_name_from_detail(
+                        page, name,
+                    )
+                    logger.info(
+                        "COURT_NAME: link_text=%r → extracted=%r",
+                        name[:60], court_name,
+                    )
+
+                    # Extract time slots for each target date
+                    target_dates = self._get_target_dates()
+                    for td in target_dates:
+                        page_slots = await self._extract_slots_from_dom(page, td)
+                        for s in page_slots:
+                            if court_name and (
+                                not s.get("court_name")
+                                or len(s["court_name"]) < 8
+                            ):
+                                s["court_name"] = court_name
+                        slots.extend(page_slots)
+
+                    # Parse API responses captured during this page load
+                    new_responses = self.captured_responses[responses_before:]
+                    for resp in new_responses:
+                        per_activity_slots = self._parse_single_response(resp)
+                        for s in per_activity_slots:
+                            if court_name and (
+                                not s.get("court_name")
+                                or len(s["court_name"]) < 8
+                            ):
+                                s["court_name"] = court_name
+                        slots.extend(per_activity_slots)
+
+                except Exception as e:
+                    logger.warning(
+                        "Error loading activity %s: %s", name[:50], e,
+                    )
+
+        logger.info("Activity search total: %d raw slots found", len(slots))
+        return slots
+
+    async def _extract_court_name_from_detail(
+        self, page: Page, link_text: str,
+    ) -> str:
+        """Extract a clean court/facility name from an activity detail page."""
+        # Try the page heading first
+        heading = await page.evaluate("""
+            () => {
+                const h = document.querySelector(
+                    'h1, h2, [class*="activity-name"], '
+                    + '[class*="activityName"], [class*="title"]'
+                );
+                return h ? h.textContent.trim() : '';
+            }
+        """)
+
+        # Try to extract from API responses (most reliable)
+        for resp in reversed(self.captured_responses[-4:]):
+            data = resp.get("data")
+            if isinstance(data, dict):
+                body = data.get("body", data)
+                if isinstance(body, dict):
+                    api_name = (
+                        body.get("activityName", "")
+                        or body.get("name", "")
+                        or body.get("description", "")
+                    )
+                    if api_name:
+                        match = FACILITY_RE.search(api_name)
+                        if match:
+                            return match.group(1)
+
+        # Try heading text
+        for candidate in [heading, link_text]:
+            if candidate:
+                match = FACILITY_RE.search(candidate)
+                if match:
+                    return match.group(1)
+
+        return link_text.strip()[:80]
+
+    # ── Facility selection ───────────────────────────────────────────
+
+    async def _try_select_facility(self, page: Page):
+        """Try to search/select McFetridge tennis courts on the Quick Reserve page."""
+        # Strategy A: Fill search/filter inputs
+        search_selectors = [
+            "input[type='search']",
+            "input[type='text'][placeholder*='search' i]",
+            "input[type='text'][placeholder*='facility' i]",
+            "input[type='text'][placeholder*='location' i]",
+            "input[name*='search' i]",
+            "input[name*='filter' i]",
+            "input[id*='search' i]",
+            "input[class*='search' i]",
+        ]
+        for sel in search_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    await el.fill("McFetridge Tennis")
+                    await el.press("Enter")
+                    logger.info("Filled search input: %s", sel)
+                    await asyncio.sleep(2)
+                    return
+            except Exception:
+                continue
+
+        # Strategy B: Click on text links/buttons
+        text_targets = [
+            "text=Tennis",
+            "text=McFetridge",
+            "text=Court Time",
+            "text=Quick Reserve",
+            "a:has-text('Tennis')",
+            "button:has-text('Tennis')",
+            "a:has-text('McFetridge')",
+            "button:has-text('McFetridge')",
+            "[role='option']:has-text('Tennis')",
+            "[role='listitem']:has-text('Tennis')",
+        ]
+        for sel in text_targets:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    await el.click()
+                    logger.info("Clicked facility selector: %s", sel)
+                    await asyncio.sleep(2)
+                    return
+            except Exception:
+                continue
+
+        # Strategy C: Select from dropdowns
+        dropdowns = await page.query_selector_all("select")
+        for dropdown in dropdowns:
+            try:
+                options = await dropdown.query_selector_all("option")
+                for opt in options:
+                    text = (await opt.text_content() or "").lower()
+                    if "tennis" in text or "mcfetridge" in text:
+                        value = await opt.get_attribute("value")
+                        if value:
+                            await dropdown.select_option(value=value)
+                            logger.info(
+                                "Selected from dropdown: %s", text,
+                            )
+                            return
+            except Exception:
+                continue
+
+        logger.warning("Could not find facility selector on Quick Reserve page")
 
     # ── Resource extraction ─────────────────────────────────────────
 

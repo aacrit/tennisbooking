@@ -1207,7 +1207,9 @@ class AvailabilityChecker:
                 # Extract available slots from DOM only if API didn't find
                 # any for this date (they represent the same grid — API is
                 # more reliable with exact resource names and times).
-                if api_slots_for_date:
+                # Also extract DOM for first date to cross-validate API.
+                is_first_date = (target_date == dates[0])
+                if api_slots_for_date and not is_first_date:
                     logger.info(
                         "Skipping DOM extraction for %s — API already "
                         "parsed %d slots",
@@ -1229,7 +1231,20 @@ class AvailabilityChecker:
                             if matched:
                                 slot["court_name"] = matched
 
-                    slots.extend(page_slots)
+                    # Cross-validate: compare API vs DOM for first date
+                    if is_first_date and api_slots_for_date:
+                        logger.info(
+                            "CROSS-VALIDATE %s: API=%d available, DOM=%d available "
+                            "(DOM non-disabled cells — if DOM << API, "
+                            "status=0 may mean 'permission' not 'available')",
+                            target_date.isoformat(),
+                            len(api_slots_for_date),
+                            len(page_slots),
+                        )
+                        # Don't double-count — use API data for first date
+                        # (DOM is only for validation)
+                    else:
+                        slots.extend(page_slots)
             else:
                 # Grid never loaded — try direct API call as last resort
                 direct_slots = await self._try_direct_availability_api(
@@ -2774,6 +2789,30 @@ class AvailabilityChecker:
             "Availability grid: resource[0] keys=%s",
             sorted(resources[0].keys()),
         )
+
+        # Dump the FULL structure of the first time_slot_detail entry
+        # to reveal all available fields beyond just "status"
+        for _res in resources:
+            _details = (
+                _res.get("timeSlotDetails")
+                or _res.get("time_slot_details")
+                or []
+            )
+            if _details and isinstance(_details[0], dict):
+                logger.info(
+                    "time_slot_detail FULL structure (resource=%s): %s",
+                    _res.get("resource_name", _res.get("resourceName", "?")),
+                    json.dumps(_details[0], default=str),
+                )
+                # Also log attendance field if present
+                att = _res.get("attendance")
+                if att is not None:
+                    logger.info(
+                        "resource attendance=%s (resource=%s)",
+                        att,
+                        _res.get("resource_name", _res.get("resourceName", "?")),
+                    )
+                break  # Only need one example
 
         # Log status value distribution for diagnostics
         status_dist: dict[int, int] = {}

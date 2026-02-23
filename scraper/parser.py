@@ -171,6 +171,17 @@ def filter_slots(raw_slots: list[dict], settings: Settings) -> list[dict]:
             "No tennis courts in %d raw slots. Court names present: %s",
             len(raw_slots), court_names[:20],
         )
+        # Log source distribution to understand where slots came from
+        sources: dict[str, int] = {}
+        for s in raw_slots:
+            raw_data = s.get("raw")
+            src = (
+                raw_data.get("source", "unknown")
+                if isinstance(raw_data, dict)
+                else "unknown"
+            )
+            sources[src] = sources.get(src, 0) + 1
+        logger.info("Raw slot sources: %s", sources)
     elif tennis_raw > 0:
         # Count how many pass date/time filters
         today = date.today()

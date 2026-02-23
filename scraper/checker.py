@@ -32,14 +32,35 @@ AVAILABILITY_API_PATTERNS = [
     "/enrollment",
 ]
 
-# Facility reservation URL — the actual court booking path.
+# Facility reservation URLs — tried in order until the Quick Reserve grid loads.
 # mcfetridgesportscenter.com "Book Court Time" links to
 # apm.activecommunities.com/chicagoparkdistrict/Reserve_Options which
 # redirects here.  Note: /reservation/quick returns 404 as of Feb 2026.
-QUICK_RESERVE_URL = (
-    "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
-    "reservation?onlineSiteId=0&from_original_cui=true&locale=en-US"
-)
+QUICK_RESERVE_URLS = [
+    # Primary: the current reservation page
+    (
+        "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
+        "reservation?onlineSiteId=0&from_original_cui=true&locale=en-US"
+    ),
+    # Quick Reserve landing (pattern from other ActiveNet sites)
+    (
+        "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
+        "reservation/landing/quick?locale=en-US"
+    ),
+    # Reservation landing
+    (
+        "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
+        "reservation/landing?locale=en-US"
+    ),
+    # Reserve Options page
+    (
+        "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
+        "Reserve_Options?onlineSiteId=0&from_original_cui=true"
+    ),
+]
+
+# Keep a single default for backward compatibility
+QUICK_RESERVE_URL = QUICK_RESERVE_URLS[0]
 
 # Activity search — fallback; searches for tennis court time activities
 ACTIVITY_SEARCH_URL = (
@@ -225,6 +246,335 @@ class AvailabilityChecker:
         except Exception as e:
             logger.warning("Failed to save diagnostic %s: %s", filename, e)
 
+    # ── Reservation page diagnostics ────────────────────────────────
+
+    async def _dump_reservation_page_state(self, page: Page, label: str):
+        """Capture detailed SPA state for the reservation page."""
+        if not self._diag_dir:
+            return
+        try:
+            state = await page.evaluate("""
+                () => {
+                    const result = {
+                        url: window.location.href,
+                        hash: window.location.hash,
+                        title: document.title,
+                        reduxKeys: null,
+                        quickReserveConfig: null,
+                        reservationLinks: [],
+                        navItems: [],
+                        selectElements: [],
+                        comboBoxes: [],
+                        bodyTextSample: (document.body?.innerText || '').substring(0, 8000),
+                    };
+
+                    // Try to access Redux store
+                    const stateObj = window.__reduxInitialState || window.__REDUX_STATE__;
+                    if (stateObj) {
+                        result.reduxKeys = Object.keys(stateObj);
+                        const json = JSON.stringify(stateObj);
+                        const configMatches = json.match(
+                            /"(enableOnline[^"]*|quick_?reserve[^"]*|disableonline[^"]*|facilit[^"]{0,30})"\s*:\s*[^,}]{1,50}/gi
+                        );
+                        result.quickReserveConfig = configMatches;
+                    }
+
+                    // Find all links related to reservation/facility
+                    document.querySelectorAll('a[href]').forEach(el => {
+                        const href = el.href || '';
+                        const text = (el.textContent || '').trim();
+                        if (/reserv|facilit|quick|booking|court|tennis/i.test(href + text)) {
+                            result.reservationLinks.push({
+                                href, text: text.substring(0, 100),
+                                class: el.className || '',
+                                visible: el.offsetParent !== null,
+                            });
+                        }
+                    });
+
+                    // Find navigation items
+                    document.querySelectorAll(
+                        'nav a, [role="navigation"] a, [class*="nav"] a, [class*="menu"] a'
+                    ).forEach(el => {
+                        result.navItems.push({
+                            href: el.href || '',
+                            text: (el.textContent || '').trim().substring(0, 80),
+                            visible: el.offsetParent !== null,
+                        });
+                    });
+
+                    // Find select elements and custom combo-boxes
+                    document.querySelectorAll('select').forEach(el => {
+                        const options = Array.from(el.options || []).map(o => o.text.substring(0, 80));
+                        result.selectElements.push({
+                            id: el.id || '', name: el.name || '',
+                            class: el.className || '',
+                            optionCount: options.length,
+                            options: options.slice(0, 20),
+                            visible: el.offsetParent !== null,
+                        });
+                    });
+
+                    document.querySelectorAll(
+                        '[role="combobox"], [role="listbox"], '
+                        + '[class*="an-dropdown"], [class*="an-select"], '
+                        + '[class*="combo-box"], [class*="combobox"]'
+                    ).forEach(el => {
+                        result.comboBoxes.push({
+                            tag: el.tagName, role: el.getAttribute('role') || '',
+                            class: el.className || '',
+                            text: (el.textContent || '').trim().substring(0, 200),
+                            visible: el.offsetParent !== null,
+                        });
+                    });
+
+                    return result;
+                }
+            """)
+            self._save_diag_json(f"reservation_state_{label}.json", state)
+            logger.info(
+                "Reservation state [%s]: url=%s, navItems=%d, links=%d, selects=%d, combos=%d",
+                label, state.get("url", "?"),
+                len(state.get("navItems", [])),
+                len(state.get("reservationLinks", [])),
+                len(state.get("selectElements", [])),
+                len(state.get("comboBoxes", [])),
+            )
+        except Exception as e:
+            logger.warning("Reservation state dump failed for %s: %s", label, e)
+
+    # ── Quick Reserve grid detection ─────────────────────────────────
+
+    async def _detect_quick_reserve_grid(self, page: Page) -> bool:
+        """Check if the Quick Reserve availability grid is visible on the page."""
+        indicators = await page.evaluate("""
+            () => {
+                const result = {
+                    hasResourceGrid: !!document.querySelector(
+                        '.an-resource-grid, [data-qa-id="resource-grid-view-container"]'
+                    ),
+                    hasGridTable: !!document.querySelector(
+                        '.an-resource-grid table, [class*="resource-grid"] table'
+                    ),
+                    hasDatePicker: !!document.querySelector(
+                        'input[aria-label*="Date" i], [class*="date-picker"] input, '
+                        + 'input[type="date"], [class*="an-date-picker"]'
+                    ),
+                    resourceHeaderCount: document.querySelectorAll(
+                        '.resource-header-cell__title, [class*="resource-header"], '
+                        + '[class*="resource-name"]'
+                    ).length,
+                    timeHeaderCount: document.querySelectorAll(
+                        'thead th .header-cell, thead th[class*="time"]'
+                    ).length,
+                    gridCellCount: document.querySelectorAll(
+                        'td.td-grid-cell, td[class*="grid-cell"]'
+                    ).length,
+                    tableCount: document.querySelectorAll('table').length,
+                    hasFacilitySelect: !!document.querySelector(
+                        'select[class*="facility" i], select[class*="center" i], '
+                        + '[class*="facility-select"], [class*="center-select"]'
+                    ),
+                    bodyHasTimeSlots: /\\d{1,2}:\\d{2}\\s*(AM|PM)/i.test(
+                        document.body?.innerText || ''
+                    ),
+                    bodyHasCourt: /tennis|court\\s*\\d|pickleball/i.test(
+                        document.body?.innerText || ''
+                    ),
+                    url: window.location.href,
+                };
+                return result;
+            }
+        """)
+
+        self._save_diag_json("grid_detection.json", indicators)
+
+        if indicators.get("hasResourceGrid") or indicators.get("hasGridTable"):
+            logger.info("Quick Reserve grid DETECTED (resource grid): %s", indicators)
+            return True
+        if indicators.get("gridCellCount", 0) > 5:
+            logger.info(
+                "Quick Reserve grid DETECTED (%d cells): %s",
+                indicators["gridCellCount"], indicators,
+            )
+            return True
+        if (indicators.get("resourceHeaderCount", 0) > 0
+                and indicators.get("timeHeaderCount", 0) > 0):
+            logger.info("Quick Reserve grid DETECTED (resource+time headers): %s", indicators)
+            return True
+
+        logger.info("Quick Reserve grid NOT detected: %s", indicators)
+        return False
+
+    # ── SPA internal navigation ──────────────────────────────────────
+
+    async def _navigate_to_quick_reserve_via_spa(self, page: Page) -> bool:
+        """Navigate within the React SPA to reach the Quick Reserve view."""
+
+        # Strategy: Click SPA navigation links
+        nav_targets = [
+            "a:has-text('Facilities')",
+            "a:has-text('Reserve')",
+            "a:has-text('Quick Reserve')",
+            "a:has-text('Make a Reservation')",
+            "a[href*='Reserve_Options']",
+            "a[href*='reservation']",
+            "a[href*='reserve']",
+            "[class*='nav'] a:has-text('Facilities')",
+            "[class*='nav'] a:has-text('Reserve')",
+            "[role='navigation'] a:has-text('Facilities')",
+            "[class*='menu'] a:has-text('Facilities')",
+            "[class*='menu'] a:has-text('Reserve')",
+        ]
+
+        for sel in nav_targets:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    logger.info("SPA nav: clicking %s", sel)
+                    await el.click()
+                    await asyncio.sleep(3)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass
+
+                    await self._save_diag(page, f"spa_nav_{sel[:30]}")
+
+                    if await self._detect_quick_reserve_grid(page):
+                        return True
+
+                    # Check if availability API was captured
+                    if self._has_availability_api():
+                        logger.info("SPA nav: availability API captured after clicking %s", sel)
+                        return True
+
+                    # Second-level navigation: after clicking a top-level link,
+                    # look for sub-options
+                    sub_targets = [
+                        "a:has-text('Quick Reserve')",
+                        "a:has-text('Court Time')",
+                        "a:has-text('Tennis')",
+                        "button:has-text('Quick Reserve')",
+                        "[class*='card']:has-text('Quick Reserve')",
+                        "[class*='card']:has-text('Reserve')",
+                        "[class*='option']:has-text('Quick Reserve')",
+                        "[class*='tile']:has-text('Reserve')",
+                    ]
+                    for sub_sel in sub_targets:
+                        try:
+                            sub_el = await page.query_selector(sub_sel)
+                            if sub_el and await sub_el.is_visible():
+                                logger.info("SPA nav: clicking sub-target %s", sub_sel)
+                                await sub_el.click()
+                                await asyncio.sleep(3)
+                                try:
+                                    await page.wait_for_load_state(
+                                        "networkidle", timeout=15000,
+                                    )
+                                except Exception:
+                                    pass
+                                if await self._detect_quick_reserve_grid(page):
+                                    return True
+                                if self._has_availability_api():
+                                    return True
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+        logger.warning("SPA navigation: could not reach Quick Reserve grid")
+        return False
+
+    def _has_availability_api(self) -> bool:
+        """Check if any captured response is a quickreservation/availability API."""
+        return any(
+            "quickreservation" in r.get("url", "").lower()
+            and "availability" in r.get("url", "").lower()
+            for r in self.captured_responses
+        )
+
+    # ── Direct API fallback ──────────────────────────────────────────
+
+    async def _try_direct_availability_api(
+        self, page: Page, target_date: date,
+    ) -> list[dict]:
+        """Call the availability API directly via page.evaluate(fetch()).
+
+        Runs in the browser context with session cookies and CSRF tokens.
+        This is a fallback when SPA navigation fails to trigger the API.
+        """
+        base = "https://anc.apm.activecommunities.com/chicagoparkdistrict"
+        date_str = target_date.isoformat()
+        api_patterns = [
+            f"{base}/rest/reservation/quickreservation/availability"
+            f"?date={date_str}&locale=en-US",
+            f"{base}/rest/reservation/quickreservation/availability"
+            f"?reservationDate={date_str}&locale=en-US",
+            f"{base}/rest/reservation/availability"
+            f"?date={date_str}&locale=en-US",
+            f"{base}/rest/facility/availability"
+            f"?date={date_str}&locale=en-US",
+        ]
+
+        for api_url in api_patterns:
+            try:
+                result = await page.evaluate("""
+                    async (url) => {
+                        try {
+                            const resp = await fetch(url, {
+                                credentials: 'include',
+                                headers: {
+                                    'Accept': 'application/json',
+                                    'X-Requested-With': 'XMLHttpRequest',
+                                },
+                            });
+                            if (!resp.ok) return { status: resp.status, ok: false };
+                            const data = await resp.json();
+                            return { status: resp.status, ok: true, data: data };
+                        } catch (e) {
+                            return { ok: false, error: e.message };
+                        }
+                    }
+                """, api_url)
+
+                if not result or not result.get("ok"):
+                    logger.debug(
+                        "Direct API %s: status=%s error=%s",
+                        api_url.split("?")[0].split("/")[-1],
+                        result.get("status", "?"),
+                        result.get("error", ""),
+                    )
+                    continue
+
+                data = result.get("data")
+                if not data:
+                    continue
+
+                logger.info(
+                    "Direct API succeeded: %s (status=%s, type=%s)",
+                    api_url[:120], result.get("status"), type(data).__name__,
+                )
+                self._save_diag_json(
+                    f"direct_api_{target_date.isoformat()}.json", data,
+                )
+
+                # Also add to captured_responses for context
+                self.captured_responses.append({"url": api_url, "data": data})
+
+                slots = self._parse_availability_grid(data, target_date)
+                if slots:
+                    logger.info(
+                        "Direct API: %d slots for %s",
+                        len(slots), target_date.isoformat(),
+                    )
+                    return slots
+
+            except Exception as e:
+                logger.debug("Direct API call failed for %s: %s", api_url[:80], e)
+
+        return []
+
     # ── Network interception ─────────────────────────────────────────
 
     async def _on_request(self, request: Request):
@@ -363,23 +713,67 @@ class AvailabilityChecker:
     async def _check_quick_reserve(self, page: Page) -> list[dict]:
         """Navigate the Quick Reserve page — the real court booking path.
 
-        This is the path real users take:
-        mcfetridgesportscenter.com → "Make a Reservation" → ActiveNet Quick Reserve.
-        The page shows a facility search where the user selects McFetridge tennis
-        courts, then picks a date and time.
+        Tries multiple URL strategies and SPA navigation to reach the
+        ActiveNet Quick Reserve availability grid.  Falls back to direct
+        API calls if the grid cannot be loaded via the UI.
         """
-        logger.info("Checking Quick Reserve page: %s", QUICK_RESERVE_URL)
-        await page.goto(QUICK_RESERVE_URL, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_load_state("networkidle", timeout=30000)
-        await asyncio.sleep(4)
+        grid_found = False
 
-        await self._save_diag(page, "quick_reserve_loaded")
+        # ── Phase 1: Try multiple Quick Reserve URLs ──────────────────
+        for i, url in enumerate(QUICK_RESERVE_URLS):
+            logger.info("Trying Quick Reserve URL [%d/%d]: %s", i + 1, len(QUICK_RESERVE_URLS), url)
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_load_state("networkidle", timeout=30000)
+                await asyncio.sleep(4)
+            except Exception as e:
+                logger.warning("URL %s failed to load: %s", url[:60], e)
+                continue
 
-        # Log the current URL (the SPA may have navigated internally)
+            url_label = url.split("/")[-1][:25].replace("?", "_")
+            await self._save_diag(page, f"qr_url_{i}_{url_label}")
+            await self._dump_reservation_page_state(page, f"url_{i}")
+
+            logger.info("Quick Reserve URL [%d] landed at: %s", i + 1, page.url)
+
+            # Check if we already landed on the grid
+            if await self._detect_quick_reserve_grid(page):
+                grid_found = True
+                break
+
+            # Check if availability API was captured during navigation
+            if self._has_availability_api():
+                logger.info("Availability API captured from URL %s", url[:60])
+                grid_found = True
+                break
+
+            # Only on the first URL, try facility selection (the SPA might
+            # show a picker that loads the grid once a facility is chosen)
+            if i == 0:
+                await self._try_select_facility(page)
+                await asyncio.sleep(3)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+                await self._save_diag(page, "after_facility_select")
+
+                if await self._detect_quick_reserve_grid(page):
+                    grid_found = True
+                    break
+                if self._has_availability_api():
+                    grid_found = True
+                    break
+
+        # ── Phase 2: SPA internal navigation ──────────────────────────
+        if not grid_found:
+            logger.info("No URL landed on grid; trying SPA internal navigation...")
+            grid_found = await self._navigate_to_quick_reserve_via_spa(page)
+
+        # ── Phase 3: Log state regardless of success ──────────────────
         current_url = page.url
-        logger.info("Quick Reserve page URL after load: %s", current_url)
+        logger.info("Quick Reserve page URL after navigation: %s", current_url)
 
-        # Dump page body text (first 3000 chars) for diagnostics
         try:
             body_text = await page.inner_text("body")
             logger.info(
@@ -389,22 +783,17 @@ class AvailabilityChecker:
         except Exception as e:
             logger.warning("Could not read body text: %s", e)
 
-        # Log all network URLs captured so far
         logger.info(
-            "Network URLs after Quick Reserve load (%d): %s",
+            "Network URLs after Quick Reserve navigation (%d): %s",
             len(self.all_network_urls),
-            json.dumps([u for u in self.all_network_urls if "activecommunities" in u], indent=2)[:3000],
+            json.dumps(
+                [u for u in self.all_network_urls if "activecommunities" in u],
+                indent=2,
+            )[:3000],
         )
-
-        # Try to select McFetridge / Tennis from whatever UI is presented
-        await self._try_select_facility(page)
-        await asyncio.sleep(3)
-        await page.wait_for_load_state("networkidle", timeout=15000)
 
         # Initialize date tracking — the grid loads with today's date
         self._current_grid_date = date.today()
-
-        await self._save_diag(page, "after_facility_select")
 
         slots = []
         total_api_slots = 0
@@ -419,10 +808,7 @@ class AvailabilityChecker:
         # Iterate through target dates
         target_dates = self._get_target_dates()
 
-        # Process initial API responses (captured during facility selection).
-        # These are for today's date (the default shown in the date picker).
-        # Today's slots will be filtered out by the parser (slot_date <= today)
-        # but we still parse them for diagnostics / logging.
+        # Process initial API responses (captured during navigation).
         if self.captured_responses and target_dates:
             initial_api_slots = self._parse_captured_responses(
                 current_date=date.today(),
@@ -437,44 +823,58 @@ class AvailabilityChecker:
 
         for target_date in target_dates:
             logger.info("Checking date: %s", target_date.isoformat())
-            date_changed = await self._try_select_date(page, target_date)
-            if date_changed:
-                await page.wait_for_load_state("networkidle", timeout=15000)
-                await asyncio.sleep(2)
 
-            await self._save_diag(page, f"date_{target_date.isoformat()}")
+            if grid_found:
+                # Normal path: change date via date picker, extract from DOM/API
+                date_changed = await self._try_select_date(page, target_date)
+                if date_changed:
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2)
 
-            # Parse any NEW captured API responses with this date
-            new_responses = self.captured_responses[api_responses_processed:]
-            if new_responses:
-                api_slots = self._parse_captured_responses(
-                    current_date=target_date,
-                    responses=new_responses,
+                await self._save_diag(page, f"date_{target_date.isoformat()}")
+
+                # Parse any NEW captured API responses with this date
+                new_responses = self.captured_responses[api_responses_processed:]
+                if new_responses:
+                    api_slots = self._parse_captured_responses(
+                        current_date=target_date,
+                        responses=new_responses,
+                    )
+                    if api_slots:
+                        slots.extend(api_slots)
+                        total_api_slots += len(api_slots)
+                    api_responses_processed = len(self.captured_responses)
+
+                # Extract available slots from DOM
+                page_slots = await self._extract_slots_from_dom(page, target_date)
+
+                # Enrich slots with resource names from the page if needed
+                for slot in page_slots:
+                    court = slot.get("court_name", "")
+                    if not court or len(court) < 8:
+                        matched = self._match_slot_to_resource(slot, resource_names)
+                        if matched:
+                            slot["court_name"] = matched
+
+                slots.extend(page_slots)
+            else:
+                # Grid never loaded — try direct API call as last resort
+                direct_slots = await self._try_direct_availability_api(
+                    page, target_date,
                 )
-                if api_slots:
-                    slots.extend(api_slots)
-                    total_api_slots += len(api_slots)
-                api_responses_processed = len(self.captured_responses)
-
-            # Extract available slots from DOM
-            page_slots = await self._extract_slots_from_dom(page, target_date)
-
-            # Enrich slots with resource names from the page if needed
-            for slot in page_slots:
-                court = slot.get("court_name", "")
-                if not court or len(court) < 8:
-                    matched = self._match_slot_to_resource(slot, resource_names)
-                    if matched:
-                        slot["court_name"] = matched
-
-            slots.extend(page_slots)
+                if direct_slots:
+                    slots.extend(direct_slots)
+                    total_api_slots += len(direct_slots)
 
         await self._dump_dom_structure(page, "dom_quick_reserve_final")
 
         logger.info(
-            "QUICK RESERVE SUMMARY: captured_responses=%d, network_urls=%d, "
-            "dom_slots=%d, api_slots=%d, total=%d, resources=%d",
-            len(self.captured_responses), len(self.all_network_urls),
+            "QUICK RESERVE SUMMARY: grid_found=%s, captured_responses=%d, "
+            "network_urls=%d, dom_slots=%d, api_slots=%d, total=%d, resources=%d",
+            grid_found, len(self.captured_responses), len(self.all_network_urls),
             len(slots) - total_api_slots, total_api_slots, len(slots),
             len(resource_names),
         )
@@ -674,17 +1074,30 @@ class AvailabilityChecker:
     # ── Facility selection ───────────────────────────────────────────
 
     async def _try_select_facility(self, page: Page):
-        """Try to search/select McFetridge tennis courts on the Quick Reserve page."""
+        """Try to search/select McFetridge tennis courts on the Quick Reserve page.
+
+        Tries multiple strategies to accommodate ActiveNet UI changes:
+        A) Fill search/filter inputs
+        B) Click text links/buttons
+        C) Select from HTML dropdowns
+        D) Interact with React combo-boxes / custom dropdowns
+        E) Click facility cards/tiles
+        F) Check if resources are already visible (no selection needed)
+        """
         # Strategy A: Fill search/filter inputs
         search_selectors = [
             "input[type='search']",
             "input[type='text'][placeholder*='search' i]",
             "input[type='text'][placeholder*='facility' i]",
             "input[type='text'][placeholder*='location' i]",
+            "input[type='text'][placeholder*='center' i]",
             "input[name*='search' i]",
             "input[name*='filter' i]",
             "input[id*='search' i]",
             "input[class*='search' i]",
+            "[class*='an-search'] input",
+            "[class*='search-bar'] input",
+            "[class*='filter-input'] input",
         ]
         for sel in search_selectors:
             try:
@@ -698,18 +1111,23 @@ class AvailabilityChecker:
             except Exception:
                 continue
 
-        # Strategy B: Click on text links/buttons
+        # Strategy B: Click on text links/buttons (expanded targets)
         text_targets = [
             "text=Tennis",
             "text=McFetridge",
             "text=Court Time",
             "text=Quick Reserve",
+            "text=Make a Reservation",
             "a:has-text('Tennis')",
             "button:has-text('Tennis')",
             "a:has-text('McFetridge')",
             "button:has-text('McFetridge')",
+            "a:has-text('Court Time')",
+            "button:has-text('Court Time')",
             "[role='option']:has-text('Tennis')",
+            "[role='option']:has-text('McFetridge')",
             "[role='listitem']:has-text('Tennis')",
+            "[role='listitem']:has-text('McFetridge')",
         ]
         for sel in text_targets:
             try:
@@ -722,10 +1140,12 @@ class AvailabilityChecker:
             except Exception:
                 continue
 
-        # Strategy C: Select from dropdowns
+        # Strategy C: Select from HTML dropdowns
         dropdowns = await page.query_selector_all("select")
         for dropdown in dropdowns:
             try:
+                if not await dropdown.is_visible():
+                    continue
                 options = await dropdown.query_selector_all("option")
                 for opt in options:
                     text = (await opt.text_content() or "").lower()
@@ -739,6 +1159,93 @@ class AvailabilityChecker:
                             return
             except Exception:
                 continue
+
+        # Strategy D: React combo-boxes / custom dropdowns
+        combo_selectors = [
+            "[role='combobox']",
+            "[role='listbox']",
+            "[class*='an-dropdown']",
+            "[class*='an-select']",
+            "[class*='combo-box']",
+            "[class*='combobox']",
+            "[class*='select-facility']",
+            "[class*='center-picker']",
+            "[class*='location-filter']",
+            "[class*='facility-filter']",
+        ]
+        for sel in combo_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    # Click to open the dropdown
+                    await el.click()
+                    logger.info("Opened React dropdown: %s", sel)
+                    await asyncio.sleep(1)
+                    # Look for McFetridge/Tennis option inside
+                    option_sels = [
+                        "[role='option']:has-text('McFetridge')",
+                        "[role='option']:has-text('Tennis')",
+                        "li:has-text('McFetridge')",
+                        "li:has-text('Tennis')",
+                        "[class*='option']:has-text('McFetridge')",
+                        "[class*='option']:has-text('Tennis')",
+                    ]
+                    for opt_sel in option_sels:
+                        try:
+                            opt_el = await page.query_selector(opt_sel)
+                            if opt_el and await opt_el.is_visible():
+                                await opt_el.click()
+                                logger.info(
+                                    "Selected React dropdown option: %s", opt_sel,
+                                )
+                                await asyncio.sleep(2)
+                                return
+                        except Exception:
+                            continue
+                    # Close the dropdown if no option was selected
+                    await page.keyboard.press("Escape")
+            except Exception:
+                continue
+
+        # Strategy E: Click facility cards/tiles
+        card_selectors = [
+            "[class*='card']:has-text('McFetridge')",
+            "[class*='card']:has-text('Tennis')",
+            "[class*='tile']:has-text('McFetridge')",
+            "[class*='tile']:has-text('Tennis')",
+            "[class*='item']:has-text('McFetridge')",
+            "[class*='option']:has-text('McFetridge')",
+            "li:has-text('McFetridge')",
+            "div[class*='center']:has-text('McFetridge')",
+            "div[class*='facility']:has-text('McFetridge')",
+        ]
+        for sel in card_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    await el.click()
+                    logger.info("Clicked facility card/tile: %s", sel)
+                    await asyncio.sleep(2)
+                    return
+            except Exception:
+                continue
+
+        # Strategy F: Check if resources are already visible
+        # (the page may have auto-selected McFetridge or doesn't need selection)
+        try:
+            resource_names = await self._extract_resource_names(page)
+            if any(
+                "tennis" in r.lower() or "mcfetridge" in r.lower()
+                for r in resource_names
+            ):
+                logger.info(
+                    "McFetridge resources already visible (%d), "
+                    "no facility selection needed",
+                    len(resource_names),
+                )
+                return
+        except Exception:
+            pass
 
         logger.warning("Could not find facility selector on Quick Reserve page")
 
@@ -884,12 +1391,34 @@ class AvailabilityChecker:
         the React SPA only responds to trusted browser events.
         """
         date_iso = target_date.isoformat()
-        date_input_sel = 'input[aria-label="Date picker, current date"]'
+
+        # Try multiple date input selectors (ActiveNet UI may change)
+        date_input_selectors = [
+            'input[aria-label="Date picker, current date"]',
+            'input[aria-label*="date" i]',
+            'input[type="date"]',
+            'input[class*="date-picker"]',
+            'input[class*="datepicker"]',
+            '[class*="an-date-picker"] input',
+            '[class*="date-picker"] input',
+            'input[placeholder*="date" i]',
+            'input[name*="date" i]',
+        ]
+
+        el = None
+        for date_input_sel in date_input_selectors:
+            try:
+                candidate = await page.query_selector(date_input_sel)
+                if candidate and await candidate.is_visible():
+                    el = candidate
+                    logger.debug("Found date picker with selector: %s", date_input_sel)
+                    break
+            except Exception:
+                continue
 
         try:
-            el = await page.query_selector(date_input_sel)
-            if not el or not await el.is_visible():
-                logger.warning("Date picker input not found or not visible")
+            if not el:
+                logger.warning("Date picker input not found with any selector")
                 return False
 
             current_val = await el.evaluate("el => el.value") or ""
@@ -902,11 +1431,27 @@ class AvailabilityChecker:
             await el.click()
 
             # Wait for the popup to actually appear in the DOM
-            try:
-                await page.wait_for_selector(
-                    ".an-date-picker__popper", state="visible", timeout=3000,
-                )
-            except Exception:
+            # Try multiple popup selectors
+            popup_selectors = [
+                ".an-date-picker__popper",
+                "[class*='date-picker'] [class*='popper']",
+                "[class*='datepicker'] [class*='popup']",
+                "[class*='calendar-popup']",
+                "[role='dialog'][class*='date']",
+            ]
+            popup_appeared = False
+            for popup_sel in popup_selectors:
+                try:
+                    await page.wait_for_selector(
+                        popup_sel, state="visible", timeout=2000,
+                    )
+                    popup_appeared = True
+                    logger.debug("Calendar popup appeared: %s", popup_sel)
+                    break
+                except Exception:
+                    continue
+
+            if not popup_appeared:
                 logger.warning("Calendar popup did not appear after clicking input")
                 return False
 
@@ -921,7 +1466,19 @@ class AvailabilityChecker:
                         el => el.removeAttribute('data-target-day')
                     );
 
-                    const popper = document.querySelector('.an-date-picker__popper');
+                    // Try multiple popup container selectors
+                    const popperSelectors = [
+                        '.an-date-picker__popper',
+                        '[class*="date-picker"] [class*="popper"]',
+                        '[class*="datepicker"] [class*="popup"]',
+                        '[class*="calendar-popup"]',
+                        '[role="dialog"]',
+                    ];
+                    let popper = null;
+                    for (const sel of popperSelectors) {
+                        popper = document.querySelector(sel);
+                        if (popper) break;
+                    }
                     if (!popper) return { found: false, reason: 'no popper' };
 
                     const cells = popper.querySelectorAll('td');
@@ -983,21 +1540,27 @@ class AvailabilityChecker:
 
             # Fallback: use Playwright's :has-text selector directly
             # (less precise for single-digit days but works as last resort)
-            fallback_sel = f".an-date-picker__popper td:has-text('{target_date.day}')"
-            try:
-                day_el = await page.query_selector(fallback_sel)
-                if day_el and await day_el.is_visible():
-                    await day_el.click()
-                    logger.info("Clicked calendar day %d via fallback selector", target_date.day)
-                    await asyncio.sleep(2)
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=10000)
-                    except Exception:
-                        pass
-                    self._current_grid_date = target_date
-                    return True
-            except Exception:
-                pass
+            fallback_sels = [
+                f".an-date-picker__popper td:has-text('{target_date.day}')",
+                f"[class*='date-picker'] td:has-text('{target_date.day}')",
+                f"[class*='calendar'] td:has-text('{target_date.day}')",
+                f"[role='dialog'] td:has-text('{target_date.day}')",
+            ]
+            for fallback_sel in fallback_sels:
+                try:
+                    day_el = await page.query_selector(fallback_sel)
+                    if day_el and await day_el.is_visible():
+                        await day_el.click()
+                        logger.info("Clicked calendar day %d via fallback selector", target_date.day)
+                        await asyncio.sleep(2)
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=10000)
+                        except Exception:
+                            pass
+                        self._current_grid_date = target_date
+                        return True
+                except Exception:
+                    continue
 
             # Close popup if nothing was clicked
             await page.keyboard.press("Escape")

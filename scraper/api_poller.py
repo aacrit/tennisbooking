@@ -79,8 +79,9 @@ def parse_api_response(data) -> list[dict]:
 def _parse_activenet_grid(data) -> list[dict]:
     """Parse ActiveNet Quick Reserve availability grid response.
 
-    Expected structure: body.availability.resources[].timeSlotDetails[].status
+    Expected structure: body.availability.resources[].time_slot_details[].status
     where status=0 means available, status=1 means unavailable.
+    Handles both snake_case and camelCase field names.
     """
     if not isinstance(data, dict):
         return []

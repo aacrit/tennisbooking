@@ -1041,15 +1041,34 @@ class AvailabilityChecker:
                     // Process each resource row in <tbody>
                     const rows = table.querySelectorAll('tbody tr, tbody [role="row"]');
                     rows.forEach((row, rowIdx) => {
-                        // Resource name from ActiveNet's specific selector
-                        const nameEl = row.querySelector(
-                            '.resource-header-cell__title, ' +
-                            '.resource-header-cell__name, ' +
-                            'th.table-sticky-left'
-                        );
-                        const resourceName = nameEl
-                            ? (nameEl.textContent || '').trim()
-                            : '';
+                        // Resource name: target the most specific element first
+                        // to avoid picking up junk from sibling elements (type tags,
+                        // selection state text like "Unselected", etc.)
+                        let resourceName = '';
+                        const titleEl = row.querySelector('.resource-header-cell__title');
+                        if (titleEl) {
+                            // Use innerText to skip hidden content; fallback to textContent
+                            resourceName = (titleEl.innerText || titleEl.textContent || '').trim();
+                        }
+                        if (!resourceName) {
+                            const nameEl = row.querySelector('.resource-header-cell__name');
+                            if (nameEl) {
+                                resourceName = (nameEl.innerText || nameEl.textContent || '').trim();
+                            }
+                        }
+                        if (!resourceName) {
+                            // Last resort: th text, but strip known junk
+                            const th = row.querySelector('th.table-sticky-left');
+                            if (th) {
+                                resourceName = (th.innerText || th.textContent || '').trim();
+                            }
+                        }
+                        // Strip ActiveNet prefix junk: "Unselected"/"Selected" state
+                        // and single-char type tags (E/F/etc.) that leak from sibling elements
+                        resourceName = resourceName
+                            .replace(/^(?:Un)?[Ss]elected/i, '')
+                            .replace(/^[A-Z](?=[A-Z][a-z])/, '')
+                            .trim();
                         if (!resourceName) return;
 
                         // Get all td cells (excluding the th header cell)
@@ -1585,11 +1604,11 @@ class AvailabilityChecker:
                             "false", "unavailable", "booked", "closed"
                         )
 
-            if time_val and available:
+            if time_val and available and name_val:
                 slots.append({
                     "date": date_val or "",
                     "time": time_val,
-                    "court_name": name_val or "",
+                    "court_name": name_val,
                     "day_of_week": "",
                     "duration_minutes": 60,
                     "raw": {"source": "deep_extraction", "path": path},

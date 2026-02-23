@@ -38,12 +38,25 @@ def _make_slot(slot_date: str, slot_time: str, court_name: str = "Tennis Ct01") 
 
 
 def _next_weekday(weekday: int) -> date:
-    """Return the next date with the given weekday (0=Mon, 6=Sun)."""
+    """Return the next date with the given weekday type within 6 days.
+
+    If the exact weekday (0=Mon, 6=Sun) would be >6 days out,
+    returns the nearest future date of the same type
+    (weekday Mon-Fri or weekend Sat-Sun) that fits in the window.
+    """
     today = date.today()
-    days_ahead = weekday - today.weekday()
-    if days_ahead <= 0:
-        days_ahead += 7
-    return today + timedelta(days=days_ahead)
+    is_weekend = weekday >= 5
+    for d in range(1, 7):
+        candidate = today + timedelta(days=d)
+        if candidate.weekday() == weekday:
+            return candidate
+        # Fallback: any day matching the weekday/weekend type
+    for d in range(1, 7):
+        candidate = today + timedelta(days=d)
+        if is_weekend == (candidate.weekday() >= 5):
+            return candidate
+    # Should never reach here, but just in case
+    return today + timedelta(days=1)
 
 
 def _settings() -> Settings:

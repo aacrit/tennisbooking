@@ -486,7 +486,7 @@ class TestDomPositiveSignalRequiresCourt:
         el = {
             "text": "9:00 AM",
             "className": "slot available",
-            "parentText": "Ct 2 availability",
+            "parentText": "Tennis Ct 2 availability",
             "dataAttrs": {},
             "ariaLabel": "",
         }

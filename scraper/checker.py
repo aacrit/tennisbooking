@@ -14,6 +14,7 @@ from datetime import datetime as dt
 from playwright.async_api import async_playwright, Page, Response, Request
 
 from config import Settings
+from scraper.parser import ALLOWED_COURTS_RE
 
 logger = logging.getLogger(__name__)
 
@@ -455,7 +456,63 @@ class AvailabilityChecker:
             r'\s*(?:Court\s+Time|Reservation|Res\b|Registration).*$',
             '', name, flags=re.IGNORECASE,
         ).strip()
-        return cleaned[:60] or name[:60]
+
+        # Strip leading date fragments (e.g. "2026" prefix from SPA rendering)
+        cleaned = re.sub(r'^\d{4}\s*', '', cleaned).strip()
+
+        # If cleaning produced a very short/garbled result (< 5 chars),
+        # the SPA likely didn't render fully. Return a more descriptive name.
+        if len(cleaned) < 5:
+            # Try to salvage from the original name
+            salvaged = re.sub(
+                r'\s*(?:Court\s+Time|Reservation|Res\b|Registration).*$',
+                '', name, flags=re.IGNORECASE,
+            ).strip()
+            salvaged = re.sub(r'^\d{4}\s*', '', salvaged).strip()
+            if len(salvaged) > len(cleaned):
+                cleaned = salvaged
+            # Still too short — use original (truncated) so it's at least diagnosable
+            if len(cleaned) < 5:
+                cleaned = name.strip()[:80]
+                logger.warning(
+                    "Activity name cleaning produced garbled result, "
+                    "using raw text: %r", cleaned,
+                )
+
+        return cleaned[:60]
+
+    @staticmethod
+    def _best_court_name(dom_name: str, activity_name: str) -> str:
+        """Choose the best court name between a DOM-extracted name and an
+        activity-page name.
+
+        Priority:
+        1. If the DOM name is a valid tennis court (Tennis Ct 1-6), keep it.
+        2. If the DOM name matches FACILITY_RE (any recognizable facility), keep it.
+        3. Otherwise, use the activity page name (if it's meaningful).
+        4. Fall back to whichever is non-empty.
+        """
+        dom_name = (dom_name or "").strip()
+        activity_name = (activity_name or "").strip()
+
+        # DOM name is a recognized tennis court — always prefer it
+        if dom_name and ALLOWED_COURTS_RE.search(dom_name):
+            return dom_name
+
+        # DOM name matches facility regex (e.g. "Pickleball Court 1")
+        if dom_name and FACILITY_RE.search(dom_name):
+            return dom_name
+
+        # Activity name is a recognized tennis court
+        if activity_name and ALLOWED_COURTS_RE.search(activity_name):
+            return activity_name
+
+        # Activity name looks like a real facility (longer than 5 chars)
+        if activity_name and len(activity_name) >= 5:
+            return activity_name
+
+        # Fall back to whatever is available
+        return dom_name or activity_name or "Unknown"
 
     async def _check_activity_search(self, page: Page) -> list[dict]:
         """Search for McFetridge activities and extract availability.
@@ -467,7 +524,7 @@ class AvailabilityChecker:
         logger.info("Checking activity search: %s", ACTIVITY_SEARCH_URL)
         await page.goto(ACTIVITY_SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_load_state("networkidle", timeout=30000)
-        await asyncio.sleep(4)  # Extra wait for SPA to render results
+        await asyncio.sleep(6)  # Extra wait for SPA to render results
 
         await self._save_diag(page, "activity_search_loaded")
         await self._dump_dom_structure(page, "dom_activity_search")
@@ -534,7 +591,48 @@ class AvailabilityChecker:
         """)
 
         logger.info("Found %d activity links/cards", len(activity_links))
+
+        # If links look garbled (very short text), wait more and retry
+        if activity_links and all(
+            len(l.get("text", "").strip()) < 10 for l in activity_links
+        ):
+            logger.warning(
+                "Activity link text looks garbled (all < 10 chars), "
+                "waiting for SPA to finish rendering..."
+            )
+            await asyncio.sleep(5)
+            activity_links = await page.evaluate("""
+                () => {
+                    const links = [];
+                    document.querySelectorAll(
+                        'a[href*="/activity/search/detail/"]'
+                    ).forEach(el => {
+                        links.push({
+                            href: el.href,
+                            text: (el.textContent || '').trim().substring(0, 200),
+                        });
+                    });
+                    return links;
+                }
+            """)
+            logger.info("Retry found %d activity links", len(activity_links))
+
         self._save_diag_json("activity_links.json", activity_links)
+
+        # Sort: tennis-related links first, then others
+        def _tennis_score(link):
+            text = (link.get("text", "") or "").lower()
+            if "tennis" in text and "ct" in text:
+                return 0  # Tennis Ct — highest priority
+            if "tennis" in text:
+                return 1
+            if "court time" in text:
+                return 2
+            if "pickleball" in text or "ball machine" in text:
+                return 3
+            return 4  # Non-court activities (clubroom, etc.)
+
+        activity_links.sort(key=_tennis_score)
 
         # Track API responses from search page (before visiting activity details)
         search_response_count = len(self.captured_responses)
@@ -564,14 +662,38 @@ class AvailabilityChecker:
                 await self._save_diag(page, f"activity_{safe_name}")
                 await self._dump_dom_structure(page, f"dom_activity_{safe_name}")
 
+                # If the search-page name was garbled, try to get a better
+                # name from the activity detail page heading or title
+                if len(clean_name) < 10 or not FACILITY_RE.search(clean_name):
+                    page_title = await page.title()
+                    heading_text = await page.evaluate("""
+                        () => {
+                            const h = document.querySelector(
+                                'h1, h2, [class*="activity-name"], '
+                                + '[class*="activityName"], [class*="title"]'
+                            );
+                            return h ? h.textContent.trim() : '';
+                        }
+                    """)
+                    for candidate in [heading_text, page_title]:
+                        better = self._clean_activity_name(candidate)
+                        if better and FACILITY_RE.search(better):
+                            logger.info(
+                                "Upgraded activity name from %r to %r "
+                                "(via detail page)",
+                                clean_name, better,
+                            )
+                            clean_name = better
+                            break
+
                 # Extract from the activity detail page
                 target_dates = self._get_target_dates()
                 for td in target_dates:
                     page_slots = await self._extract_slots_from_dom(page, td)
-                    # ALWAYS override court_name with the activity name
-                    # (DOM extraction produces garbled names; activity name is reliable)
                     for s in page_slots:
-                        s["court_name"] = clean_name
+                        s["court_name"] = self._best_court_name(
+                            s.get("court_name", ""), clean_name,
+                        )
                     slots.extend(page_slots)
 
                 # Parse API responses captured DURING this activity's page load
@@ -579,7 +701,9 @@ class AvailabilityChecker:
                 for resp in new_responses:
                     per_activity_slots = self._parse_single_response(resp)
                     for s in per_activity_slots:
-                        s["court_name"] = clean_name
+                        s["court_name"] = self._best_court_name(
+                            s.get("court_name", ""), clean_name,
+                        )
                     slots.extend(per_activity_slots)
 
             except Exception as e:

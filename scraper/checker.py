@@ -724,6 +724,14 @@ class AvailabilityChecker:
         Anonymous users see all court resources as status=1 (unavailable).
         Only equipment (ball machines) shows real availability.  Logging in
         reveals actual court availability data.
+
+        Strategy:
+        1. Navigate to sign-in page, wait for React to render
+        2. Dump form elements for diagnostics (what selectors exist?)
+        3. Try Playwright auto-waiting fill() (handles React render delays)
+        4. Fallback: JavaScript injection to fill + trigger React events
+        5. Intercept login API POST to discover the REST endpoint
+        6. Verify login via cookies and page indicators
         """
         username = self.settings.activenet_username
         password = self.settings.activenet_password
@@ -737,7 +745,19 @@ class AvailabilityChecker:
 
         logger.info("Logging in to ActiveNet as %s...", username)
 
-        # Navigate to the sign-in page
+        # ── Log session cookies BEFORE login ────────────────────────────
+        try:
+            cookies_before = await page.context.cookies()
+            session_cookies = {
+                c["name"]: (c["value"][:20] + "..." if c["value"] else "(empty)")
+                for c in cookies_before
+                if "SESSION" in c["name"].upper() or "LOGGED" in c["name"].upper()
+            }
+            logger.info("Session cookies BEFORE login: %s", session_cookies)
+        except Exception as e:
+            logger.debug("Could not read cookies before login: %s", e)
+
+        # ── Navigate to the sign-in page ────────────────────────────────
         signin_url = (
             "https://anc.apm.activecommunities.com/chicagoparkdistrict"
             "/signin?onlineSiteId=0&from_original_cui=true&locale=en-US"
@@ -748,9 +768,69 @@ class AvailabilityChecker:
             logger.warning("Failed to load sign-in page: %s", e)
             return False
 
-        await asyncio.sleep(2)  # Wait for React to render the form
+        # Wait longer for React/Redux SPA to render the form
+        await asyncio.sleep(5)
+        await self._save_diag(page, "login_page_loaded")
 
-        # Find and fill email/username input (try multiple selectors)
+        # ── Dump form elements for diagnostics ──────────────────────────
+        try:
+            form_info = await page.evaluate('''() => {
+                const els = document.querySelectorAll(
+                    'input, button[type="submit"], button, [role="button"]'
+                );
+                return Array.from(els).map(el => ({
+                    tag: el.tagName,
+                    type: el.type || '',
+                    name: el.name || '',
+                    id: el.id || '',
+                    placeholder: el.placeholder || '',
+                    dataQa: el.getAttribute('data-qa-id')
+                            || el.getAttribute('data-qa') || '',
+                    ariaLabel: el.getAttribute('aria-label') || '',
+                    className: (typeof el.className === 'string'
+                                ? el.className : '').substring(0, 100),
+                    visible: el.offsetParent !== null,
+                    text: (el.textContent || '').trim().substring(0, 40)
+                }));
+            }''')
+            logger.info(
+                "Sign-in page form elements (%d found): %s",
+                len(form_info),
+                json.dumps(form_info, indent=2),
+            )
+        except Exception as e:
+            logger.warning("Could not dump form elements: %s", e)
+
+        # ── Register login API interceptor ──────────────────────────────
+        login_api_info: dict = {}
+
+        async def _intercept_login(route, request):
+            url_lower = request.url.lower()
+            if request.method == "POST" and any(
+                kw in url_lower
+                for kw in ("login", "signin", "auth", "session")
+            ):
+                login_api_info["url"] = request.url
+                login_api_info["method"] = request.method
+                try:
+                    post_data = request.post_data or ""
+                    # Mask the password in logs
+                    masked = post_data.replace(password, "***") if password else post_data
+                    login_api_info["body_masked"] = masked[:200]
+                except Exception:
+                    pass
+                logger.info(
+                    "Intercepted login API: %s (method=%s)",
+                    request.url, request.method,
+                )
+            await route.continue_()
+
+        try:
+            await page.route("**/*", _intercept_login)
+        except Exception as e:
+            logger.debug("Could not register login interceptor: %s", e)
+
+        # ── Strategy A: Playwright auto-waiting fill() ──────────────────
         email_selectors = [
             'input[data-qa-id="login-email"]',
             'input[type="email"]',
@@ -762,81 +842,120 @@ class AvailabilityChecker:
             'input[placeholder*="Email" i]',
             'input[aria-label*="email" i]',
             '#loginName',
+            # Broader fallbacks
+            'form input[type="text"]',
+            'form input[type="email"]',
         ]
-        email_input = None
-        for sel in email_selectors:
-            try:
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    email_input = el
-                    logger.info("Found email input: %s", sel)
-                    break
-            except Exception:
-                continue
-
-        if not email_input:
-            # Broader fallback: first visible text/email input in a form
-            try:
-                email_input = await page.query_selector(
-                    'form input[type="text"], form input[type="email"]'
-                )
-                if email_input:
-                    logger.info("Found email input via form fallback")
-            except Exception:
-                pass
-
-        if not email_input:
-            logger.warning("Could not find email input on sign-in page")
-            await self._save_diag(page, "login_no_email_input")
-            return False
-
-        # Find and fill password input
         password_selectors = [
             'input[data-qa-id="login-password"]',
             'input[type="password"]',
             'input[name="password"]',
             '#password',
         ]
-        password_input = None
-        for sel in password_selectors:
+
+        email_filled = False
+        for sel in email_selectors:
             try:
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    password_input = el
-                    logger.info("Found password input: %s", sel)
-                    break
+                await page.fill(sel, username, timeout=3000)
+                logger.info("Filled email via auto-wait: %s", sel)
+                email_filled = True
+                break
             except Exception:
                 continue
 
-        if not password_input:
-            logger.warning("Could not find password input on sign-in page")
-            await self._save_diag(page, "login_no_password_input")
+        pw_filled = False
+        for sel in password_selectors:
+            try:
+                await page.fill(sel, password, timeout=3000)
+                logger.info("Filled password via auto-wait: %s", sel)
+                pw_filled = True
+                break
+            except Exception:
+                continue
+
+        # ── Strategy B: JavaScript injection fallback ───────────────────
+        if not email_filled or not pw_filled:
+            logger.info(
+                "Playwright fill() failed (email=%s, pw=%s) — trying JS injection",
+                email_filled, pw_filled,
+            )
+            try:
+                js_result = await page.evaluate('''(creds) => {
+                    const selectors = {
+                        email: [
+                            'input[type="email"]', 'input[name="email"]',
+                            'input[name="loginName"]', 'input[name="username"]',
+                            'input[data-qa-id="login-email"]',
+                            'input[placeholder*="email" i]',
+                            'input[id="email"]', '#loginName',
+                            'form input[type="text"]',
+                        ],
+                        password: [
+                            'input[type="password"]', 'input[name="password"]',
+                            'input[data-qa-id="login-password"]', '#password',
+                        ],
+                    };
+
+                    function findEl(sels) {
+                        for (const s of sels) {
+                            const el = document.querySelector(s);
+                            if (el && el.offsetParent !== null) return el;
+                        }
+                        return null;
+                    }
+
+                    const emailEl = findEl(selectors.email);
+                    const pwEl = findEl(selectors.password);
+                    if (!emailEl || !pwEl) {
+                        return {ok: false, emailFound: !!emailEl, pwFound: !!pwEl};
+                    }
+
+                    // Use native value setter to trigger React state updates
+                    const nativeSetter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'value'
+                    ).set;
+                    nativeSetter.call(emailEl, creds.username);
+                    emailEl.dispatchEvent(new Event('input', {bubbles: true}));
+                    emailEl.dispatchEvent(new Event('change', {bubbles: true}));
+                    nativeSetter.call(pwEl, creds.password);
+                    pwEl.dispatchEvent(new Event('input', {bubbles: true}));
+                    pwEl.dispatchEvent(new Event('change', {bubbles: true}));
+                    return {ok: true, emailTag: emailEl.tagName, pwTag: pwEl.tagName};
+                }''', {"username": username, "password": password})
+                logger.info("JS injection result: %s", js_result)
+                if js_result and js_result.get("ok"):
+                    email_filled = True
+                    pw_filled = True
+            except Exception as e:
+                logger.warning("JS injection failed: %s", e)
+
+        if not email_filled or not pw_filled:
+            logger.warning(
+                "Could not fill login form (email=%s, pw=%s)",
+                email_filled, pw_filled,
+            )
+            await self._save_diag(page, "login_form_fill_failed")
+            try:
+                await page.unroute("**/*", _intercept_login)
+            except Exception:
+                pass
             return False
 
-        # Fill credentials
-        await email_input.click()
-        await email_input.fill(username)
-        await password_input.click()
-        await password_input.fill(password)
-
-        # Find and click submit button
+        # ── Submit the form ─────────────────────────────────────────────
         submit_selectors = [
             'button[data-qa-id="login-submit"]',
             'button[type="submit"]',
             'button:has-text("Sign In")',
             'button:has-text("Log In")',
             'input[type="submit"]',
-            'a:has-text("Sign In")',
         ]
         clicked = False
         for sel in submit_selectors:
             try:
-                btn = await page.query_selector(sel)
-                if btn and await btn.is_visible():
-                    await btn.click()
-                    clicked = True
-                    logger.info("Clicked login submit: %s", sel)
-                    break
+                await page.click(sel, timeout=3000)
+                clicked = True
+                logger.info("Clicked login submit: %s", sel)
+                break
             except Exception:
                 continue
 
@@ -852,12 +971,35 @@ class AvailabilityChecker:
             pass
         await asyncio.sleep(3)
 
-        # Verify login succeeded
+        # ── Remove interceptor ──────────────────────────────────────────
+        try:
+            await page.unroute("**/*", _intercept_login)
+        except Exception:
+            pass
+
+        if login_api_info:
+            logger.info("Login API discovered: %s", json.dumps(login_api_info))
+
+        # ── Log session cookies AFTER login ─────────────────────────────
+        try:
+            cookies_after = await page.context.cookies()
+            session_cookies_after = {
+                c["name"]: (c["value"][:20] + "..." if c["value"] else "(empty)")
+                for c in cookies_after
+                if "SESSION" in c["name"].upper() or "LOGGED" in c["name"].upper()
+            }
+            logger.info("Session cookies AFTER login: %s", session_cookies_after)
+        except Exception as e:
+            logger.debug("Could not read cookies after login: %s", e)
+
+        # ── Verify login succeeded ──────────────────────────────────────
         logged_in = await self._verify_login(page)
         if logged_in:
-            logger.info("Login successful")
+            logger.info("Login successful — authenticated session active")
         else:
-            logger.warning("Login may have failed — continuing anyway")
+            logger.warning(
+                "Login verification failed — continuing in anonymous mode"
+            )
             await self._save_diag(page, "login_verification_failed")
 
         return logged_in
@@ -910,6 +1052,26 @@ class AvailabilityChecker:
         ActiveNet Quick Reserve availability grid.  Falls back to direct
         API calls if the grid cannot be loaded via the UI.
         """
+        # Verify login session is still active before scraping
+        try:
+            cookies = await page.context.cookies()
+            logged_session = [
+                c for c in cookies
+                if "LOGGED" in c["name"].upper() and c["value"]
+            ]
+            if logged_session:
+                logger.info(
+                    "Quick Reserve: logged session active (%s)",
+                    logged_session[0]["name"],
+                )
+            else:
+                logger.warning(
+                    "Quick Reserve: NO logged session cookie — "
+                    "running as anonymous (courts will show unavailable)"
+                )
+        except Exception:
+            pass
+
         grid_found = False
 
         # ── Phase 1: Try multiple Quick Reserve URLs ──────────────────

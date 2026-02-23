@@ -14,7 +14,6 @@ from datetime import datetime as dt
 from playwright.async_api import async_playwright, Page, Response, Request
 
 from config import Settings
-from scraper.parser import ALLOWED_COURTS_RE
 
 logger = logging.getLogger(__name__)
 
@@ -33,29 +32,10 @@ AVAILABILITY_API_PATTERNS = [
     "/enrollment",
 ]
 
-# McFetridge activity search — this is the ACTUAL path users take to find court time
-ACTIVITY_SEARCH_URL = (
-    "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
-    "activity/search?onlineSiteId=0&locale=en-US"
-    "&activity_select_param=2&activity_keyword=mcfetridge&viewMode=list"
-)
-
-# Quick reservation URL (facility reservation interface)
+# Quick reservation URL — McFetridge facility reservation page (groupId=2)
 BOOKING_URL = (
     "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
-    "reservation/landing/quick?groupId=1&locale=en-US"
-)
-
-# Reservation page (where "Make a Reservation" on mcfetridgesportscenter.com redirects)
-RESERVATION_URL = (
-    "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
-    "reservation?onlineSiteId=0&from_original_cui=true"
-)
-
-# Legacy booking URL (may have simpler interface)
-LEGACY_URL = (
-    "https://apm.activecommunities.com/chicagoparkdistrict/"
-    "ActiveNet_Home?FileName=onlinequickfacilityreserve.sdi"
+    "reservation/landing/quick?groupId=2&locale=en-US"
 )
 
 # Facility name regex — only matches known McFetridge facility patterns.
@@ -291,23 +271,8 @@ class AvailabilityChecker:
             page.on("response", self._on_response)
 
             try:
-                # Strategy 1: Activity search (primary — how users actually find court time)
-                all_slots = await self._check_activity_search(page)
-
-                # Strategy 2: Quick reservation page
-                if not all_slots:
-                    logger.info("No slots from activity search, trying quick reservation...")
-                    all_slots = await self._check_modern_portal(page)
-
-                # Strategy 3: Reservation page (where McFetridge site links to)
-                if not all_slots:
-                    logger.info("No slots from quick reservation, trying reservation page...")
-                    all_slots = await self._check_reservation_page(page)
-
-                # Strategy 4: Legacy portal
-                if not all_slots:
-                    logger.info("No slots from reservation page, trying legacy...")
-                    all_slots = await self._check_legacy_portal(page)
+                # Quick reservation page — shows all McFetridge resources directly
+                all_slots = await self._check_modern_portal(page)
 
             except Exception as e:
                 logger.exception("Scraper error: %s", e)
@@ -346,24 +311,30 @@ class AvailabilityChecker:
     # ── Modern portal ────────────────────────────────────────────────
 
     async def _check_modern_portal(self, page: Page) -> list[dict]:
-        """Navigate the modern ANC ActiveNet portal."""
-        logger.info("Checking modern portal: %s", BOOKING_URL)
+        """Navigate the quick reservation page and extract available slots.
+
+        The quick reservation page (groupId=2) shows all McFetridge resources
+        directly — Tennis Ct01-06, Pickleball, Ball Machines, etc.
+        No facility selection needed; all resources are visible at once.
+        """
+        logger.info("Checking quick reservation page: %s", BOOKING_URL)
         await page.goto(BOOKING_URL, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_load_state("networkidle", timeout=30000)
         await asyncio.sleep(3)
 
-        await self._save_diag(page, "page_loaded")
+        await self._save_diag(page, "reservation_page_loaded")
         await self._dump_dom_structure(page, "dom_structure_initial")
 
-        # Try to find and interact with the facility reservation interface
         slots = []
 
-        # Step 1: Look for facility/activity selection
-        await self._try_select_tennis(page)
-        await asyncio.sleep(2)
-        await self._save_diag(page, "after_tennis_select")
+        # Step 1: Extract resource names from the page
+        resource_names = await self._extract_resource_names(page)
+        logger.info(
+            "Found %d resources on reservation page: %s",
+            len(resource_names), resource_names,
+        )
 
-        # Step 2: Check dates
+        # Step 2: Iterate through target dates
         target_dates = self._get_target_dates()
         for target_date in target_dates:
             logger.info("Checking date: %s", target_date.isoformat())
@@ -376,6 +347,15 @@ class AvailabilityChecker:
 
             # Step 3: Extract available slots from DOM
             page_slots = await self._extract_slots_from_dom(page, target_date)
+
+            # Enrich slots with resource names from the page if needed
+            for slot in page_slots:
+                court = slot.get("court_name", "")
+                if not court or len(court) < 8:
+                    matched = self._match_slot_to_resource(slot, resource_names)
+                    if matched:
+                        slot["court_name"] = matched
+
             slots.extend(page_slots)
 
         # Also check captured API responses for slot data
@@ -388,530 +368,143 @@ class AvailabilityChecker:
 
         logger.info(
             "SCRAPER SUMMARY: captured_responses=%d, network_urls=%d, "
-            "dom_slots=%d, api_slots=%d, total=%d",
+            "dom_slots=%d, api_slots=%d, total=%d, resources=%d",
             len(self.captured_responses), len(self.all_network_urls),
             len(slots) - len(api_slots), len(api_slots), len(slots),
+            len(resource_names),
         )
 
         return slots
 
-    # ── Legacy portal ────────────────────────────────────────────────
+    # ── Resource extraction ─────────────────────────────────────────
 
-    async def _check_legacy_portal(self, page: Page) -> list[dict]:
-        """Navigate the legacy ActiveNet portal."""
-        logger.info("Checking legacy portal: %s", LEGACY_URL)
-        try:
-            await page.goto(LEGACY_URL, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_load_state("networkidle", timeout=30000)
-            await asyncio.sleep(3)
-        except Exception as e:
-            logger.warning("Legacy portal failed to load: %s", e)
-            return []
+    async def _extract_resource_names(self, page: Page) -> list[str]:
+        """Extract resource/facility names from the quick reservation page.
 
-        await self._save_diag(page, "legacy_loaded")
-
-        slots = []
-
-        # The legacy portal may have a simpler form-based interface
-        # Look for facility dropdowns, date selectors, and availability grids
-        await self._try_select_tennis(page)
-        await asyncio.sleep(2)
-
-        target_dates = self._get_target_dates()
-        for target_date in target_dates:
-            await self._try_select_date(page, target_date)
-            await asyncio.sleep(2)
-            page_slots = await self._extract_slots_from_dom(page, target_date)
-            slots.extend(page_slots)
-
-        return slots
-
-    # ── Activity search approach (PRIMARY) ─────────────────────────
-
-    @staticmethod
-    def _clean_activity_name(name: str) -> str:
-        """Extract a clean court/activity identifier from search result text.
-
-        e.g. "McFetridge Tennis Ct 1 Court Time Reservation Feb 20-25 2026..."
-             → "McFetridge Tennis Ct 1"
+        The ActiveNet quick reservation page displays resources in a list
+        or grid. Resource names from this page are already properly formatted
+        (e.g. "McFetridge Tennis Ct01").
         """
-        if not name:
-            return ""
-
-        # Try FACILITY_RE first (Tennis Ct 1, Pickleball Court, etc.)
-        match = FACILITY_RE.search(name)
-        if match:
-            return match.group(1).strip()
-
-        # Try a broader pattern: "McFetridge <something> Court Time"
-        match = re.search(
-            r'(McFetridge\s+[\w\s]+?)(?:\s+Court\s+Time|\s+Reservation|\s+Res\b)',
-            name, re.IGNORECASE,
-        )
-        if match:
-            return match.group(1).strip()
-
-        # Strip leading date fragments (e.g. "2026" prefix from SPA rendering)
-        name = re.sub(r'^\d{4}\s*', '', name).strip()
-
-        # Strip common suffixes and keep meaningful prefix
-        cleaned = re.sub(
-            r'\s*(?:Court\s+Time|Reservation|Res\b|Registration).*$',
-            '', name, flags=re.IGNORECASE,
-        ).strip()
-
-        # If cleaning produced a short result, the SPA likely didn't render
-        # fully. Return the full cleaned text so _best_court_name() can
-        # evaluate it properly (and reject if too short).
-        if len(cleaned) < 8:
-            # Try to preserve more of the original name
-            fallback = re.sub(r'^\d{4}\s*', '', name).strip()
-            fallback = re.sub(
-                r'\s*(?:Court\s+Time|Reservation|Res\b|Registration).*$',
-                '', fallback, flags=re.IGNORECASE,
-            ).strip()
-            if len(fallback) > len(cleaned):
-                cleaned = fallback
-            if len(cleaned) < 8:
-                logger.warning(
-                    "Activity name cleaning produced short result: %r from %r",
-                    cleaned, name[:80],
-                )
-
-        return cleaned[:60]
-
-    @staticmethod
-    def _best_court_name(dom_name: str, activity_name: str) -> str:
-        """Choose the best court name between a DOM-extracted name and an
-        activity-page name.
-
-        Priority:
-        1. If either name is a valid tennis court (Tennis Ct 1-6), prefer it.
-        2. If either name matches FACILITY_RE (recognizable facility), prefer it.
-        3. Use whichever is non-empty and at least 8 chars.
-        4. Fall back to "Unknown" rather than accepting garbled text.
-        """
-        dom_name = (dom_name or "").strip()
-        activity_name = (activity_name or "").strip()
-
-        MIN_NAME_LEN = 8
-
-        # Reject very short names that don't match a known court pattern
-        # — they're likely garbled SPA output like "Act" or "ct 218"
-        if dom_name and len(dom_name) < MIN_NAME_LEN:
-            if not ALLOWED_COURTS_RE.search(dom_name):
-                dom_name = ""
-        if activity_name and len(activity_name) < MIN_NAME_LEN:
-            if not ALLOWED_COURTS_RE.search(activity_name):
-                activity_name = ""
-
-        # DOM name is a recognized tennis court — always prefer it
-        if dom_name and ALLOWED_COURTS_RE.search(dom_name):
-            return dom_name
-
-        # DOM name matches facility regex (e.g. "Pickleball Court 1")
-        if dom_name and FACILITY_RE.search(dom_name):
-            return dom_name
-
-        # Activity name is a recognized tennis court
-        if activity_name and ALLOWED_COURTS_RE.search(activity_name):
-            return activity_name
-
-        # Activity name matches facility regex
-        if activity_name and FACILITY_RE.search(activity_name):
-            return activity_name
-
-        # Use longer name if it looks meaningful (>= MIN_NAME_LEN)
-        if activity_name and len(activity_name) >= MIN_NAME_LEN:
-            return activity_name
-        if dom_name and len(dom_name) >= MIN_NAME_LEN:
-            return dom_name
-
-        # Fall back — reject garbage
-        return dom_name or activity_name or "Unknown"
-
-    def _extract_activity_name_from_responses(
-        self, responses: list[dict]
-    ) -> str:
-        """Try to extract a clean activity name from captured API JSON responses.
-
-        The /rest/activity/detail/{id} endpoint returns structured JSON with
-        the real activity name (e.g. "McFetridge Tennis Ct 1 Court Time").
-        This is far more reliable than DOM text which may not fully render.
-        """
-        NAME_KEYS = [
-            "activityName", "name", "title", "activity_name",
-            "facilityName", "facility_name", "activityTitle",
-        ]
-        WRAPPER_KEYS = ["body", "data", "result", "activity"]
-
-        for resp in responses:
-            url = resp.get("url", "")
-            # Focus on activity detail endpoints, skip button-status etc.
-            if "/activity/detail/" not in url:
-                continue
-            if any(skip in url for skip in ["/buttonstatus/", "/estimateprice/",
-                                             "/meetingandregistrationdates/"]):
-                continue
-
-            data = resp.get("data")
-            if not isinstance(data, dict):
-                continue
-
-            # Search top-level keys
-            for key in NAME_KEYS:
-                val = data.get(key, "")
-                if val and isinstance(val, str) and len(val) >= 10:
-                    candidate = self._clean_activity_name(val)
-                    if ALLOWED_COURTS_RE.search(candidate) or (
-                        FACILITY_RE.search(candidate) and len(candidate) >= 10
-                    ):
-                        logger.info("API name extraction: %r → %r", val[:80], candidate)
-                        return candidate
-
-            # Search inside nested wrappers
-            for wrapper in WRAPPER_KEYS:
-                inner = data.get(wrapper)
-                if not isinstance(inner, dict):
-                    continue
-                for key in NAME_KEYS:
-                    val = inner.get(key, "")
-                    if val and isinstance(val, str) and len(val) >= 10:
-                        candidate = self._clean_activity_name(val)
-                        if ALLOWED_COURTS_RE.search(candidate) or (
-                            FACILITY_RE.search(candidate) and len(candidate) >= 10
-                        ):
-                            logger.info(
-                                "API name extraction (nested): %r → %r",
-                                val[:80], candidate,
-                            )
-                            return candidate
-
-        return ""
-
-    async def _check_activity_search(self, page: Page) -> list[dict]:
-        """Search for McFetridge activities and extract availability.
-
-        This is the primary approach — it mirrors what actual users do:
-        search for McFetridge activities, click on court time listings,
-        and view available sessions.
-        """
-        logger.info("Checking activity search: %s", ACTIVITY_SEARCH_URL)
-        await page.goto(ACTIVITY_SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_load_state("networkidle", timeout=30000)
-        await asyncio.sleep(6)  # Extra wait for SPA to render results
-
-        await self._save_diag(page, "activity_search_loaded")
-        await self._dump_dom_structure(page, "dom_activity_search")
-
-        slots = []
-
-        # Find activity listing links from the rendered search results
-        activity_links = await page.evaluate("""
+        resource_names = await page.evaluate("""
             () => {
-                const links = [];
+                const names = new Set();
+                const courtPattern = /McFetridge|Tennis|Pickleball|Ball\\s*Machine|Clubroom/i;
+                const detailedPattern = /(?:McFetridge\\s+)?(?:Tennis\\s+(?:Ct|Court)\\s*\\d+|Pickleball\\s+(?:Ct|Court)\\s*\\d*|Ball\\s+Machine\\s*\\d*)/i;
 
-                // Strategy A: Look for links to activity detail pages
-                document.querySelectorAll('a[href*="/activity/search/detail/"]').forEach(el => {
-                    links.push({
-                        href: el.href,
-                        text: (el.textContent || '').trim().substring(0, 200),
-                    });
-                });
+                // Strategy A: Look for resource/facility labeled elements
+                const resourceSelectors = [
+                    '[class*="resource"] [class*="name"]',
+                    '[class*="facility"] [class*="name"]',
+                    '[class*="resource-name"]',
+                    '[class*="facility-name"]',
+                    '[class*="resource-label"]',
+                    '[class*="resource-title"]',
+                    '[class*="lane-name"]',
+                    '[class*="room-name"]',
+                    '[class*="booking-resource"]',
+                    '[class*="reservation-resource"]',
+                    'th[class*="resource"]',
+                    'td[class*="resource-header"]',
+                ];
 
-                // Strategy B: Look for any links/buttons with court-related text
-                if (links.length === 0) {
-                    document.querySelectorAll('a, button, [role="link"]').forEach(el => {
-                        const text = (el.textContent || '').toLowerCase();
-                        const href = el.href || el.getAttribute('href') || '';
-                        if (text.includes('court time') || text.includes('tennis ct') ||
-                            text.includes('pickleball') || text.includes('ball machine') ||
-                            text.includes('mcfetridge')) {
-                            links.push({
-                                href: href,
-                                text: (el.textContent || '').trim().substring(0, 200),
-                            });
+                for (const sel of resourceSelectors) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        const text = (el.textContent || '').trim();
+                        if (text.length > 5 && text.length < 100 && courtPattern.test(text)) {
+                            names.add(text);
                         }
                     });
                 }
 
-                // Strategy C: Look for any card/list item components with activity names
-                if (links.length === 0) {
-                    const cardSelectors = [
-                        '[class*="activity"]', '[class*="result"]',
-                        '[class*="card"]', '[class*="listing"]',
-                        '[class*="item"]', 'li',
-                    ];
-                    for (const sel of cardSelectors) {
-                        document.querySelectorAll(sel).forEach(el => {
-                            const text = (el.textContent || '').toLowerCase();
-                            if (text.length < 500 && (
-                                text.includes('court') || text.includes('tennis') ||
-                                text.includes('pickleball') || text.includes('ball machine')
-                            )) {
-                                const link = el.querySelector('a');
-                                links.push({
-                                    href: link ? (link.href || '') : '',
-                                    text: (el.textContent || '').trim().substring(0, 200),
-                                    isCard: true,
-                                });
-                            }
-                        });
-                        if (links.length > 0) break;
-                    }
+                // Strategy B: Look for table headers / row labels
+                if (names.size === 0) {
+                    document.querySelectorAll(
+                        'th, td:first-child, [role="rowheader"], [role="columnheader"]'
+                    ).forEach(el => {
+                        const text = (el.textContent || '').trim();
+                        if (text.length > 5 && text.length < 100 && courtPattern.test(text)) {
+                            names.add(text);
+                        }
+                    });
                 }
 
-                return links;
+                // Strategy C: Broader scan for text matching resource patterns
+                if (names.size === 0) {
+                    document.querySelectorAll('div, span, label, a, button, li').forEach(el => {
+                        const text = (el.textContent || '').trim();
+                        if (text.length > 5 && text.length < 80) {
+                            const match = text.match(detailedPattern);
+                            if (match) {
+                                names.add(match[0]);
+                            }
+                        }
+                    });
+                }
+
+                return Array.from(names);
             }
         """)
 
-        logger.info("Found %d activity links/cards", len(activity_links))
-
-        # If links look garbled (very short text), wait more and retry
-        if activity_links and all(
-            len(l.get("text", "").strip()) < 10 for l in activity_links
-        ):
-            logger.warning(
-                "Activity link text looks garbled (all < 10 chars), "
-                "waiting for SPA to finish rendering..."
-            )
-            await asyncio.sleep(5)
-            activity_links = await page.evaluate("""
-                () => {
-                    const links = [];
-                    document.querySelectorAll(
-                        'a[href*="/activity/search/detail/"]'
-                    ).forEach(el => {
-                        links.push({
-                            href: el.href,
-                            text: (el.textContent || '').trim().substring(0, 200),
-                        });
-                    });
-                    return links;
-                }
-            """)
-            logger.info("Retry found %d activity links", len(activity_links))
-
-        self._save_diag_json("activity_links.json", activity_links)
-
-        # Sort: tennis-related links first, then others
-        def _tennis_score(link):
-            text = (link.get("text", "") or "").lower()
-            if "tennis" in text and "ct" in text:
-                return 0  # Tennis Ct — highest priority
-            if "tennis" in text:
-                return 1
-            if "court time" in text:
-                return 2
-            if "pickleball" in text or "ball machine" in text:
-                return 3
-            return 4  # Non-court activities (clubroom, etc.)
-
-        activity_links.sort(key=_tennis_score)
-
-        # Track API responses from search page (before visiting activity details)
-        search_response_count = len(self.captured_responses)
-
-        # Visit each activity detail page to get availability
-        for link in activity_links[:10]:
-            href = link.get("href", "")
-            name = link.get("text", "").strip()
-            if not href or not href.startswith("http"):
+        # Also try to extract resource names from captured API responses
+        for resp in self.captured_responses:
+            data = resp.get("data")
+            if not isinstance(data, dict):
                 continue
+            for key in ["resources", "facilities", "items", "data"]:
+                items = data.get(key)
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict):
+                            name = str(
+                                item.get("resourceName",
+                                         item.get("name",
+                                                   item.get("facilityName", "")))
+                            ).strip()
+                            if name and FACILITY_RE.search(name):
+                                resource_names.append(name)
 
-            # Extract a clean court/activity identifier from the link text
-            clean_name = self._clean_activity_name(name)
-            logger.info(
-                "Checking activity: %s → clean_name=%s", name[:80], clean_name,
-            )
+        # Deduplicate while preserving order
+        seen = set()
+        unique_names = []
+        for name in resource_names:
+            if name not in seen:
+                seen.add(name)
+                unique_names.append(name)
 
-            # Track which API responses belong to THIS activity page
-            responses_before = len(self.captured_responses)
+        self._save_diag_json("resource_names.json", unique_names)
+        return unique_names
 
-            try:
-                await page.goto(href, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_load_state("networkidle", timeout=30000)
-                await asyncio.sleep(3)
+    def _match_slot_to_resource(
+        self, slot: dict, resource_names: list[str]
+    ) -> str:
+        """Try to match a slot to a known resource name from the page.
 
-                safe_name = re.sub(r'[^\w]', '_', name[:30])
-                await self._save_diag(page, f"activity_{safe_name}")
-                await self._dump_dom_structure(page, f"dom_activity_{safe_name}")
+        Uses the slot's raw data (context text, parent text, aria label)
+        to identify which resource the slot belongs to.
+        """
+        original = slot.get("court_name", "").strip()
+        raw = slot.get("raw", {})
 
-                # If the search-page name was garbled, try to get a better
-                # name from the activity detail page heading or title
-                if len(clean_name) < 10 or not FACILITY_RE.search(clean_name):
-                    page_title = await page.title()
-                    heading_text = await page.evaluate("""
-                        () => {
-                            const h = document.querySelector(
-                                'h1, h2, [class*="activity-name"], '
-                                + '[class*="activityName"], [class*="title"]'
-                            );
-                            return h ? h.textContent.trim() : '';
-                        }
-                    """)
-                    for candidate in [heading_text, page_title]:
-                        better = self._clean_activity_name(candidate)
-                        if better and FACILITY_RE.search(better):
-                            logger.info(
-                                "Upgraded activity name from %r to %r "
-                                "(via detail page)",
-                                clean_name, better,
-                            )
-                            clean_name = better
-                            break
+        # Check if original already matches a known resource
+        if original:
+            for name in resource_names:
+                if name.lower() in original.lower() or original.lower() in name.lower():
+                    return name
 
-                # Parse API responses captured DURING this activity's page load
-                new_responses = self.captured_responses[responses_before:]
+        # Check contextText / parentText for resource name matches
+        for text_key in ["contextText", "parentText"]:
+            context = str(raw.get(text_key, ""))
+            for name in resource_names:
+                if name in context:
+                    return name
 
-                # Try to upgrade clean_name from structured API JSON
-                # (more reliable than DOM text which may not render)
-                initial_clean = clean_name
-                api_name = self._extract_activity_name_from_responses(
-                    new_responses,
-                )
-                if api_name:
-                    clean_name = api_name
+        # Check ariaLabel
+        aria = str(raw.get("ariaLabel", ""))
+        for name in resource_names:
+            if name.lower() in aria.lower():
+                return name
 
-                logger.info(
-                    "COURT_NAME: link_text=%r → clean=%r → api=%r → final=%r",
-                    name[:60], initial_clean, api_name or "none", clean_name,
-                )
-
-                # Extract from the activity detail page
-                target_dates = self._get_target_dates()
-                for td in target_dates:
-                    page_slots = await self._extract_slots_from_dom(page, td)
-                    for s in page_slots:
-                        s["court_name"] = self._best_court_name(
-                            s.get("court_name", ""), clean_name,
-                        )
-                    slots.extend(page_slots)
-
-                # Also parse slots from the captured API responses
-                for resp in new_responses:
-                    per_activity_slots = self._parse_single_response(resp)
-                    for s in per_activity_slots:
-                        s["court_name"] = self._best_court_name(
-                            s.get("court_name", ""), clean_name,
-                        )
-                    slots.extend(per_activity_slots)
-
-            except Exception as e:
-                logger.warning("Error loading activity %s: %s", name[:50], e)
-
-        # Log the activity name mapping for diagnostics
-        activity_name_map = [
-            {"raw": link.get("text", "")[:100],
-             "clean": self._clean_activity_name(link.get("text", "")),
-             "href": link.get("href", "")}
-            for link in activity_links[:10]
-        ]
-        self._save_diag_json("activity_name_map.json", activity_name_map)
-
-        logger.info(
-            "Activity search: %d links checked, %d total slots found",
-            len(activity_links), len(slots),
-        )
-
-        return slots
-
-    # ── Reservation page approach ─────────────────────────────────
-
-    async def _check_reservation_page(self, page: Page) -> list[dict]:
-        """Check the reservation page (where McFetridge site links to)."""
-        logger.info("Checking reservation page: %s", RESERVATION_URL)
-        try:
-            await page.goto(RESERVATION_URL, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_load_state("networkidle", timeout=30000)
-            await asyncio.sleep(3)
-        except Exception as e:
-            logger.warning("Reservation page failed to load: %s", e)
-            return []
-
-        await self._save_diag(page, "reservation_page_loaded")
-        await self._dump_dom_structure(page, "dom_reservation_page")
-
-        slots = []
-
-        # Try to interact with the reservation interface
-        await self._try_select_tennis(page)
-        await asyncio.sleep(2)
-
-        target_dates = self._get_target_dates()
-        for target_date in target_dates:
-            await self._try_select_date(page, target_date)
-            await asyncio.sleep(2)
-            page_slots = await self._extract_slots_from_dom(page, target_date)
-            slots.extend(page_slots)
-
-        # Check captured API responses
-        api_slots = self._parse_captured_responses()
-        if api_slots:
-            slots.extend(api_slots)
-
-        return slots
-
-    # ── Facility selection ───────────────────────────────────────────
-
-    async def _try_select_tennis(self, page: Page):
-        """Try to select tennis/McFetridge from facility selection."""
-        selectors_to_try = [
-            # Text-based selectors
-            "text=Tennis",
-            "text=McFetridge",
-            "text=Tennis Court",
-            "text=Court Time",
-            # Common dropdown/select patterns
-            "select[name*='facility' i]",
-            "select[name*='type' i]",
-            "select[id*='facility' i]",
-            # React component patterns
-            "[class*='facility'] [class*='option']",
-            "[class*='category'] [class*='item']",
-            "[data-facility-type*='tennis' i]",
-            # Button/link patterns
-            "a:has-text('Tennis')",
-            "button:has-text('Tennis')",
-            "[role='option']:has-text('Tennis')",
-            "[role='listitem']:has-text('Tennis')",
-        ]
-
-        for selector in selectors_to_try:
-            try:
-                el = await page.query_selector(selector)
-                if el:
-                    is_vis = await el.is_visible()
-                    logger.debug("Tennis selector '%s': found=True visible=%s", selector, is_vis)
-                    if is_vis:
-                        await el.click()
-                        logger.info("Clicked tennis selector: %s", selector)
-                        await asyncio.sleep(1)
-                        return True
-                else:
-                    logger.debug("Tennis selector '%s': not found", selector)
-            except Exception as e:
-                logger.debug("Tennis selector '%s': error=%s", selector, e)
-                continue
-
-        # Try selecting from a dropdown by value
-        dropdowns = await page.query_selector_all("select")
-        for dropdown in dropdowns:
-            try:
-                options = await dropdown.query_selector_all("option")
-                for opt in options:
-                    text = (await opt.text_content() or "").lower()
-                    if "tennis" in text or "mcfetridge" in text:
-                        value = await opt.get_attribute("value")
-                        if value:
-                            await dropdown.select_option(value=value)
-                            logger.info("Selected tennis from dropdown: %s", text)
-                            return True
-            except Exception:
-                continue
-
-        logger.warning("Could not find tennis facility selector")
-        return False
+        return ""
 
     # ── Date selection ───────────────────────────────────────────────
 

@@ -19,6 +19,6 @@ primary_region = "ord"  # Chicago (closest to McFetridge)
   destination = "/app/data"
 
 [[vm]]
-  memory = "512mb"
+  memory = "1024mb"   # Chromium needs ~300-400MB + Python/FastAPI overhead
   cpu_kind = "shared"
   cpus = 1

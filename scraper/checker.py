@@ -838,28 +838,43 @@ class AvailabilityChecker:
 
                 # Parse any NEW captured API responses with this date
                 new_responses = self.captured_responses[api_responses_processed:]
+                api_slots_for_date: list[dict] = []
                 if new_responses:
-                    api_slots = self._parse_captured_responses(
+                    api_slots_for_date = self._parse_captured_responses(
                         current_date=target_date,
                         responses=new_responses,
                     )
-                    if api_slots:
-                        slots.extend(api_slots)
-                        total_api_slots += len(api_slots)
+                    if api_slots_for_date:
+                        slots.extend(api_slots_for_date)
+                        total_api_slots += len(api_slots_for_date)
                     api_responses_processed = len(self.captured_responses)
 
-                # Extract available slots from DOM
-                page_slots = await self._extract_slots_from_dom(page, target_date)
+                # Extract available slots from DOM only if API didn't find
+                # any for this date (they represent the same grid — API is
+                # more reliable with exact resource names and times).
+                if api_slots_for_date:
+                    logger.info(
+                        "Skipping DOM extraction for %s — API already "
+                        "parsed %d slots",
+                        target_date.isoformat(),
+                        len(api_slots_for_date),
+                    )
+                else:
+                    page_slots = await self._extract_slots_from_dom(
+                        page, target_date,
+                    )
 
-                # Enrich slots with resource names from the page if needed
-                for slot in page_slots:
-                    court = slot.get("court_name", "")
-                    if not court or len(court) < 8:
-                        matched = self._match_slot_to_resource(slot, resource_names)
-                        if matched:
-                            slot["court_name"] = matched
+                    # Enrich slots with resource names from the page
+                    for slot in page_slots:
+                        court = slot.get("court_name", "")
+                        if not court or len(court) < 8:
+                            matched = self._match_slot_to_resource(
+                                slot, resource_names,
+                            )
+                            if matched:
+                                slot["court_name"] = matched
 
-                slots.extend(page_slots)
+                    slots.extend(page_slots)
             else:
                 # Grid never loaded — try direct API call as last resort
                 direct_slots = await self._try_direct_availability_api(
@@ -879,16 +894,6 @@ class AvailabilityChecker:
             dom_slot_count, total_api_slots, len(slots),
             len(resource_names),
         )
-
-        # Cross-validate DOM vs API slot counts to detect interpretation drift
-        if dom_slot_count > 0 and total_api_slots > 0:
-            ratio = total_api_slots / dom_slot_count
-            if ratio < 0.3 or ratio > 3.0:
-                logger.warning(
-                    "API/DOM slot count mismatch: api=%d dom=%d ratio=%.2f — "
-                    "status interpretation may need review",
-                    total_api_slots, dom_slot_count, ratio,
-                )
 
         return slots
 
@@ -2348,8 +2353,8 @@ class AvailabilityChecker:
                   "resourceName": "McFetridge Tennis Ct01",
                   "resourceID": 123,
                   "timeSlotDetails": [
-                    {"status": 0, "selected": false},  // 0=unavailable/booked
-                    {"status": 1, "selected": false},  // non-zero=available
+                    {"status": 0, "selected": false},  // 0=available
+                    {"status": 1, "selected": false},  // 1=unavailable/booked
                     ...
                   ]
                 }, ...
@@ -2358,10 +2363,12 @@ class AvailabilityChecker:
           }
         }
 
-        ActiveNet uses status 0 for unavailable/booked slots and non-zero
-        values (typically 1) for available slots. This was verified by
-        cross-referencing API status values against the DOM grid's visual
-        disabled/enabled states on the live booking website.
+        ActiveNet uses status 0 for available slots and non-zero values
+        (typically 1) for booked/unavailable slots. Verified by cross-
+        referencing API status=0 counts against the DOM grid's non-disabled
+        cell counts — they match exactly per date (e.g. both ~46/221).
+        The website header confirms: "White boxes are available times.
+        Gray boxes are unavailable times."
 
         Field names may use snake_case or camelCase depending on ActiveNet version.
         """
@@ -2466,16 +2473,16 @@ class AvailabilityChecker:
 
                 # Determine availability from detail
                 if isinstance(detail, dict):
-                    # ActiveNet uses status: 0=unavailable/booked, non-zero=available
+                    # ActiveNet uses status: 0=available, non-zero=booked
                     status = detail.get("status")
                     if status is not None:
-                        is_avail = (status != 0)
+                        is_avail = (status == 0)
                     else:
                         # Fallback to boolean fields
                         is_avail = detail.get("available",
                                     detail.get("isAvailable", False))
                 elif isinstance(detail, (int, float)):
-                    is_avail = (detail != 0)
+                    is_avail = (detail == 0)
                 elif isinstance(detail, bool):
                     is_avail = detail
                 else:

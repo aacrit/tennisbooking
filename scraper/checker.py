@@ -1008,193 +1008,87 @@ class AvailabilityChecker:
         except Exception as e:
             logger.warning("DOM scraping error (targeted): %s", e)
 
-        # Strategy 2c: Grid-aware DOM scan — read the Quick Reserve
-        # availability grid, checking each cell's availability status.
-        # The grid has rows (resources) and columns (time slots).
-        # Available = white/clickable, Unavailable = gray/disabled.
+        # Strategy 2c: ActiveNet Quick Reserve grid scan.
+        # The grid uses: .resource-header-cell__title for resource names,
+        # td.td-grid-cell--disabled for unavailable cells (gray),
+        # td.td-grid-cell (without --disabled) for available cells (white).
+        # Time headers are in thead th .header-cell elements.
         strategy_counts["grid_dom"] = 0
         try:
             grid_slots = await page.evaluate("""
                 () => {
                     const results = [];
-                    const facilityPattern = /(?:McFetridge\\s+)?(?:Tennis|Pickleball|Ball\\s*Machine)/i;
 
-                    // Find all table-like grid containers
-                    const tables = document.querySelectorAll('table, [role="grid"], [class*="grid"], [class*="schedule"], [class*="availability"]');
+                    // ActiveNet Quick Reserve grid container
+                    const grid = document.querySelector(
+                        '.an-resource-grid, [data-qa-id="resource-grid-view-container"]'
+                    );
+                    if (!grid) return results;
 
-                    for (const table of tables) {
-                        // Extract column headers (time slots)
-                        const headers = [];
-                        const headerCells = table.querySelectorAll('thead th, thead td, tr:first-child th, tr:first-child td, [role="columnheader"]');
-                        headerCells.forEach(th => {
-                            headers.push((th.textContent || '').trim());
-                        });
+                    const table = grid.querySelector('table');
+                    if (!table) return results;
 
-                        if (headers.length === 0) {
-                            const firstRow = table.querySelector('tr');
-                            if (firstRow) {
-                                firstRow.querySelectorAll('td, th').forEach(td => {
-                                    headers.push((td.textContent || '').trim());
+                    // Extract time slot headers from <thead>
+                    const timeHeaders = [];
+                    table.querySelectorAll('thead th .header-cell, thead th').forEach(th => {
+                        const text = (th.textContent || '').trim();
+                        const m = text.match(/\\d{1,2}:\\d{2}\\s*(?:AM|PM)/i);
+                        if (m) timeHeaders.push(m[0]);
+                    });
+
+                    if (timeHeaders.length < 3) return results;
+
+                    // Process each resource row in <tbody>
+                    const rows = table.querySelectorAll('tbody tr, tbody [role="row"]');
+                    rows.forEach((row, rowIdx) => {
+                        // Resource name from ActiveNet's specific selector
+                        const nameEl = row.querySelector(
+                            '.resource-header-cell__title, ' +
+                            '.resource-header-cell__name, ' +
+                            'th.table-sticky-left'
+                        );
+                        const resourceName = nameEl
+                            ? (nameEl.textContent || '').trim()
+                            : '';
+                        if (!resourceName) return;
+
+                        // Get all td cells (excluding the th header cell)
+                        const cells = row.querySelectorAll('td.td-grid-cell');
+
+                        cells.forEach((cell, colIdx) => {
+                            if (colIdx >= timeHeaders.length) return;
+
+                            const cls = (cell.className || '').toLowerCase();
+                            // ActiveNet: --disabled class = unavailable (gray)
+                            // Absence of --disabled = available (white)
+                            const isDisabled = cls.includes('td-grid-cell--disabled');
+
+                            if (!isDisabled) {
+                                results.push({
+                                    resourceName: resourceName.substring(0, 100),
+                                    time: timeHeaders[colIdx],
+                                    rowIndex: rowIdx,
                                 });
                             }
-                        }
-
-                        // Find time columns
-                        const timeColumns = {};
-                        headers.forEach((h, i) => {
-                            const m = h.match(/\\d{1,2}:\\d{2}\\s*(?:AM|PM)/i);
-                            if (m) timeColumns[i] = m[0];
                         });
-
-                        if (Object.keys(timeColumns).length < 3) continue;
-
-                        // Process data rows (skip header row)
-                        const rows = table.querySelectorAll('tr');
-                        for (let r = 1; r < rows.length; r++) {
-                            const cells = rows[r].querySelectorAll('td, th');
-                            if (cells.length === 0) continue;
-
-                            // Strategy A: First cell text as resource name
-                            let resourceName = (cells[0].textContent || '').trim();
-
-                            // Strategy B: Check th element in this row
-                            if (!facilityPattern.test(resourceName)) {
-                                const th = rows[r].querySelector('th');
-                                if (th) resourceName = (th.textContent || '').trim();
-                            }
-
-                            // Strategy C: Row aria-label or data attributes
-                            if (!facilityPattern.test(resourceName)) {
-                                const rowLabel = rows[r].getAttribute('aria-label') || '';
-                                if (facilityPattern.test(rowLabel)) {
-                                    resourceName = rowLabel;
-                                }
-                            }
-                            if (!facilityPattern.test(resourceName)) {
-                                for (const attr of rows[r].attributes || []) {
-                                    if (attr.name.startsWith('data-') && facilityPattern.test(attr.value)) {
-                                        resourceName = attr.value;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if (!resourceName || resourceName.length > 100) continue;
-
-                            // Check each time column cell
-                            for (const [colIdx, timeStr] of Object.entries(timeColumns)) {
-                                const idx = parseInt(colIdx);
-                                if (idx >= cells.length) continue;
-                                const cell = cells[idx];
-                                const cls = (cell.className || '').toLowerCase();
-                                const style = (cell.getAttribute('style') || '').toLowerCase();
-                                const ariaDisabled = cell.getAttribute('aria-disabled');
-                                const isLink = cell.querySelector('a, button') !== null || cell.tagName === 'A';
-
-                                const isUnavailable = (
-                                    cls.includes('unavailable') || cls.includes('booked') ||
-                                    cls.includes('disabled') || cls.includes('closed') ||
-                                    cls.includes('blocked') || ariaDisabled === 'true' ||
-                                    (style.includes('background') && (style.includes('gray') || style.includes('grey') || style.includes('#ccc') || style.includes('#ddd')))
-                                );
-
-                                const isAvailable = (
-                                    cls.includes('available') || cls.includes('bookable') ||
-                                    cls.includes('open') || cls.includes('free') || isLink
-                                );
-
-                                if (!isUnavailable && (isAvailable || !cls.includes('header'))) {
-                                    results.push({
-                                        resourceName: resourceName.substring(0, 100),
-                                        time: timeStr,
-                                        className: cls.substring(0, 200),
-                                        hasLink: isLink,
-                                        isAvailable: isAvailable,
-                                        isUnavailable: isUnavailable,
-                                        rowIndex: r,
-                                    });
-                                }
-                            }
-                        }
-                    }
-
-                    // If no table-based grid found, try div-based grid
-                    if (results.length === 0) {
-                        const rowContainers = document.querySelectorAll(
-                            '[class*="resource-row"], [class*="facility-row"], [class*="lane-row"]'
-                        );
-                        rowContainers.forEach(row => {
-                            const nameEl = row.querySelector('[class*="name"], [class*="label"], [class*="title"]');
-                            const resourceName = nameEl ? (nameEl.textContent || '').trim() : '';
-                            if (!resourceName) return;
-
-                            row.querySelectorAll('[class*="cell"], [class*="slot"], [class*="time"]').forEach(cell => {
-                                const text = (cell.textContent || '').trim();
-                                const m = text.match(/\\d{1,2}:\\d{2}\\s*(?:AM|PM)/i);
-                                if (!m) return;
-
-                                const cls = (cell.className || '').toLowerCase();
-                                const isUnavailable = cls.includes('unavailable') || cls.includes('booked') || cls.includes('disabled');
-                                const isAvailable = cls.includes('available') || cls.includes('bookable') || cls.includes('open');
-
-                                if (!isUnavailable) {
-                                    results.push({
-                                        resourceName: resourceName.substring(0, 100),
-                                        time: m[0],
-                                        className: cls.substring(0, 200),
-                                        hasLink: cell.querySelector('a, button') !== null,
-                                        isAvailable: isAvailable,
-                                        isUnavailable: isUnavailable,
-                                        rowIndex: -1,
-                                    });
-                                }
-                            });
-                        });
-                    }
+                    });
 
                     return results;
                 }
             """)
 
             if grid_slots:
-                logger.info("Grid-aware DOM scan found %d cells", len(grid_slots))
-                # Log sample resource names for diagnostics
+                logger.info("Grid-aware DOM scan found %d available cells", len(grid_slots))
                 sample_names = sorted(set(
                     c.get("resourceName", "")[:60] for c in grid_slots[:50]
                 ))
-                logger.info(
-                    "Grid-aware DOM scan resourceNames (sample): %s", sample_names
-                )
+                logger.info("Grid DOM resourceNames: %s", sample_names)
                 self._save_diag_json(
                     f"grid_dom_{target_date.isoformat()}.json", grid_slots
                 )
 
-                # Map rowIndex → known resource name if JS couldn't find it
-                row_to_resource = {}
-                if resource_names:
-                    for cell in grid_slots:
-                        ri = cell.get("rowIndex", -1)
-                        rn = cell.get("resourceName", "")
-                        if ri >= 0 and not FACILITY_RE.search(rn):
-                            # Try to map this row to a known resource by index
-                            # (rows are typically ordered same as resource list)
-                            idx = ri - 1  # row 1 = first resource
-                            if 0 <= idx < len(resource_names):
-                                row_to_resource[ri] = resource_names[idx]
-
-                if row_to_resource:
-                    logger.info(
-                        "Grid DOM: mapping %d rows to known resources: %s",
-                        len(row_to_resource),
-                        {k: v for k, v in list(row_to_resource.items())[:5]},
-                    )
-
                 for cell in grid_slots:
                     court_name = cell.get("resourceName", "")
-                    # Use row→resource mapping if cell name doesn't match
-                    ri = cell.get("rowIndex", -1)
-                    if ri in row_to_resource and not FACILITY_RE.search(court_name):
-                        court_name = row_to_resource[ri]
                     time_str = cell.get("time", "")
                     if court_name and time_str:
                         time_match = re.search(
@@ -1744,8 +1638,28 @@ class AvailabilityChecker:
     def _parse_availability_grid(self, data: dict, current_date: date) -> list[dict]:
         """Parse the Quick Reserve availability API response grid.
 
-        The /rest/reservation/quickreservation/availability endpoint returns
-        a structured grid with time_slots and per-resource availability.
+        ActiveNet /rest/reservation/quickreservation/availability returns:
+        {
+          "body": {
+            "availability": {
+              "time_slots": ["06:00:00", "07:00:00", ...],
+              "time_increment": 60,
+              "resources": [
+                {
+                  "resourceName": "McFetridge Tennis Ct01",
+                  "resourceID": 123,
+                  "timeSlotDetails": [
+                    {"status": 0, "selected": false},  // 0=available
+                    {"status": 1, "selected": false},  // 1=unavailable
+                    ...
+                  ]
+                }, ...
+              ]
+            }
+          }
+        }
+
+        Field names may use snake_case or camelCase depending on ActiveNet version.
         """
         slots = []
 
@@ -1757,123 +1671,116 @@ class AvailabilityChecker:
             logger.debug("Availability grid: no 'availability' dict found")
             return []
 
-        time_slots = avail.get("time_slots", [])
+        # time_slots can be snake_case or camelCase
+        time_slots = (
+            avail.get("time_slots")
+            or avail.get("timeSlots")
+            or []
+        )
         if not time_slots:
             logger.debug("Availability grid: no time_slots array")
             return []
+
+        time_increment = (
+            avail.get("time_increment")
+            or avail.get("timeIncrement")
+            or 60
+        )
 
         logger.info(
             "Availability grid: %d time_slots, keys=%s",
             len(time_slots), sorted(avail.keys()),
         )
 
-        # Look for resource availability data
-        resources = (
-            avail.get("resources", [])
-            or avail.get("facilities", [])
-            or avail.get("resource_availability", [])
-            or avail.get("items", [])
-        )
-
+        resources = avail.get("resources", [])
         if not resources:
-            for key in ["booking_slots", "reservation_slots", "slots",
-                        "facility_availability", "availability_data",
-                        "resource_data", "grid", "matrix", "cells",
-                        "date_availability"]:
-                val = avail.get(key)
-                if isinstance(val, list) and val:
-                    resources = val
-                    logger.info("Availability grid: found resource data in '%s' (%d items)", key, len(val))
-                    break
-
-        if resources and isinstance(resources[0], dict):
-            # Log the first resource's full structure for diagnostics
-            first_res = resources[0]
             logger.info(
-                "Availability grid: resource[0] keys=%s, structure=%s",
-                sorted(first_res.keys()),
-                self._describe_structure(first_res, max_depth=3),
-            )
-
-            for res in resources:
-                # Try many possible key names for resource name
-                res_name = ""
-                for name_key in [
-                    "resource_name", "resourceName", "name",
-                    "facility_name", "facilityName", "title",
-                    "resource_label", "label", "description",
-                    "display_name", "displayName",
-                ]:
-                    val = res.get(name_key)
-                    if isinstance(val, str) and val.strip():
-                        res_name = val.strip()
-                        break
-
-                # Try many possible keys for per-time-slot availability
-                avail_arr = None
-                for avail_key in [
-                    "availability", "available_slots", "time_availability",
-                    "slots", "schedule", "time_slots", "booking_slots",
-                    "cell_statuses", "statuses", "cells",
-                ]:
-                    val = res.get(avail_key)
-                    if isinstance(val, list) and len(val) == len(time_slots):
-                        avail_arr = val
-                        break
-
-                # Also try: ANY list field with exactly len(time_slots) items
-                if avail_arr is None:
-                    for key, val in res.items():
-                        if isinstance(val, list) and len(val) == len(time_slots):
-                            avail_arr = val
-                            logger.info(
-                                "Availability grid: found time-aligned list in '%s' for resource '%s'",
-                                key, res_name,
-                            )
-                            break
-
-                if avail_arr is None:
-                    continue
-
-                for i, ts in enumerate(time_slots):
-                    is_avail = avail_arr[i]
-                    if isinstance(is_avail, dict):
-                        is_avail = is_avail.get("available",
-                                    is_avail.get("isAvailable",
-                                    is_avail.get("status", "") == "available"))
-                    # Treat non-zero ints/bools as available
-                    if is_avail:
-                        # Parse time string (could be "06:00:00" or "6:00 AM")
-                        time_str = str(ts)
-                        if len(time_str.split(":")) == 3:
-                            # "06:00:00" → "06:00"
-                            time_str = ":".join(time_str.split(":")[:2])
-                        slots.append({
-                            "date": current_date.isoformat(),
-                            "time": time_str,
-                            "court_name": res_name,
-                            "day_of_week": current_date.strftime("%A"),
-                            "duration_minutes": avail.get("time_increment", 60),
-                            "raw": {"source": "availability_grid"},
-                        })
-
-        if not slots and resources:
-            logger.info(
-                "Availability grid: found %d resources but parsed 0 slots. "
-                "resource[0] full dump: %s",
-                len(resources),
-                json.dumps(resources[0], default=str)[:2000],
-            )
-        elif slots:
-            logger.info(
-                "Availability grid: parsed %d slots from %d resources",
-                len(slots), len(resources),
-            )
-        else:
-            logger.info(
-                "Availability grid: no resource arrays found. Full structure: %s",
+                "Availability grid: no 'resources' array. Full structure: %s",
                 self._describe_structure(avail, max_depth=5),
             )
+            return []
+
+        if not isinstance(resources[0], dict):
+            return []
+
+        # Log first resource structure for diagnostics
+        logger.info(
+            "Availability grid: resource[0] keys=%s",
+            sorted(resources[0].keys()),
+        )
+
+        for res in resources:
+            # Resource name: try camelCase first, then snake_case
+            res_name = str(
+                res.get("resourceName", "")
+                or res.get("resource_name", "")
+                or res.get("name", "")
+            ).strip()
+
+            # Per-time-slot availability: timeSlotDetails or time_slot_details
+            details = (
+                res.get("timeSlotDetails")
+                or res.get("time_slot_details")
+                or []
+            )
+
+            # Fallback: find ANY list with same length as time_slots
+            if not details:
+                for key, val in res.items():
+                    if isinstance(val, list) and len(val) == len(time_slots):
+                        details = val
+                        logger.info(
+                            "Availability grid: using '%s' as slot details for '%s'",
+                            key, res_name,
+                        )
+                        break
+
+            if len(details) != len(time_slots):
+                continue
+
+            for i, ts in enumerate(time_slots):
+                detail = details[i]
+
+                # Determine availability from detail
+                if isinstance(detail, dict):
+                    # ActiveNet uses status: 0=available, 1=unavailable
+                    status = detail.get("status")
+                    if status is not None:
+                        is_avail = (status == 0)
+                    else:
+                        # Fallback to boolean fields
+                        is_avail = detail.get("available",
+                                    detail.get("isAvailable", False))
+                elif isinstance(detail, (int, float)):
+                    is_avail = (detail == 0)
+                elif isinstance(detail, bool):
+                    is_avail = detail
+                else:
+                    continue
+
+                if not is_avail:
+                    continue
+
+                # Parse time: "06:00:00" → "06:00"
+                time_str = str(ts)
+                parts = time_str.split(":")
+                if len(parts) == 3:
+                    time_str = f"{parts[0]}:{parts[1]}"
+
+                slots.append({
+                    "date": current_date.isoformat(),
+                    "time": time_str,
+                    "court_name": res_name,
+                    "day_of_week": current_date.strftime("%A"),
+                    "duration_minutes": time_increment,
+                    "raw": {"source": "availability_grid"},
+                })
+
+        logger.info(
+            "Availability grid: parsed %d available slots from %d resources "
+            "(total cells=%d)",
+            len(slots), len(resources), len(resources) * len(time_slots),
+        )
 
         return slots
 

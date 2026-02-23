@@ -874,16 +874,18 @@ class AvailabilityChecker:
     # ── Date selection ───────────────────────────────────────────────
 
     async def _try_select_date(self, page: Page, target_date: date) -> bool:
-        """Try to select a specific date in the booking calendar.
+        """Try to select a specific date in the ActiveNet Quick Reserve calendar.
 
-        ActiveNet Quick Reserve uses either:
-        1. A date input field (text input with MM/DD/YYYY format)
-        2. Left/right arrow buttons to navigate day by day
-        3. A calendar popup with clickable day cells
+        ActiveNet uses an `an-date-picker` component with:
+        - A text input: aria-label="Date picker, current date"
+          value format: "Mon, Feb 23, 2026"
+        - A popper/dropdown calendar: .an-date-picker__popper
+        - Container: .an-date-picker.quick-rez__date-picker
         """
-        date_str = target_date.strftime("%m/%d/%Y")
         date_iso = target_date.isoformat()
-        day_num = str(target_date.day)
+
+        # Format date to match ActiveNet's display format: "Tue, Feb 24, 2026"
+        date_display = target_date.strftime("%a, %b ") + str(target_date.day) + target_date.strftime(", %Y")
 
         # First time only: log what date-related elements exist on the page
         if not hasattr(self, "_date_picker_logged"):
@@ -892,30 +894,15 @@ class AvailabilityChecker:
                 date_elements = await page.evaluate("""
                     () => {
                         const results = [];
-                        // Look for date-related inputs, buttons, and controls
                         const selectors = [
-                            'input[type="date"]',
-                            'input[class*="date" i]',
-                            'input[id*="date" i]',
-                            'input[name*="date" i]',
-                            'input[placeholder*="date" i]',
-                            'input[placeholder*="/" i]',
-                            'input[class*="picker" i]',
-                            '[class*="datepicker" i]',
+                            'input[aria-label*="date" i]',
                             '[class*="date-picker" i]',
-                            '[class*="calendar" i]',
-                            '[data-qa-id*="date" i]',
-                            '[aria-label*="date" i]',
                             '[class*="an-date" i]',
+                            '[class*="calendar" i]',
                             'button[class*="arrow" i]',
                             'button[class*="chevron" i]',
                             'button[class*="prev" i]',
                             'button[class*="next" i]',
-                            '[class*="navigate" i]',
-                            'button[aria-label*="previous" i]',
-                            'button[aria-label*="next" i]',
-                            'button[aria-label*="forward" i]',
-                            'button[aria-label*="backward" i]',
                         ];
                         for (const sel of selectors) {
                             document.querySelectorAll(sel).forEach(el => {
@@ -928,7 +915,6 @@ class AvailabilityChecker:
                                     value: (el.value || '').substring(0, 50),
                                     text: (el.textContent || '').trim().substring(0, 100),
                                     ariaLabel: el.getAttribute('aria-label') || '',
-                                    dataQaId: el.getAttribute('data-qa-id') || '',
                                     visible: el.offsetParent !== null,
                                 });
                             });
@@ -943,147 +929,110 @@ class AvailabilityChecker:
                         json.dumps(date_elements[:20], indent=2)[:3000],
                     )
                 else:
-                    logger.info("No date picker elements found with standard selectors")
-
-                # Also check for any visible text inputs (ActiveNet may use plain text input)
-                all_inputs = await page.evaluate("""
-                    () => {
-                        const results = [];
-                        document.querySelectorAll('input[type="text"], input:not([type])').forEach(el => {
-                            if (el.offsetParent !== null) {
-                                results.push({
-                                    tag: 'INPUT',
-                                    type: el.type || 'text',
-                                    className: (el.className || '').substring(0, 200),
-                                    id: el.id || '',
-                                    value: (el.value || '').substring(0, 50),
-                                    placeholder: el.placeholder || '',
-                                    ariaLabel: el.getAttribute('aria-label') || '',
-                                });
-                            }
-                        });
-                        return results;
-                    }
-                """)
-                if all_inputs:
-                    logger.info("Visible text inputs: %s", json.dumps(all_inputs[:10])[:1000])
+                    logger.info("No date picker elements found")
             except Exception as e:
                 logger.warning("Date picker diagnostics error: %s", e)
 
-        # Strategy 1: ActiveNet date input — look for text input showing a date
-        # ActiveNet may use a text input with MM/DD/YYYY or similar format
+        # Strategy 1: ActiveNet date input with aria-label
+        # The input shows "Mon, Feb 23, 2026" and has aria-label="Date picker, current date"
+        date_input_sel = 'input[aria-label="Date picker, current date"]'
         try:
-            date_input = await page.evaluate("""
-                () => {
-                    // Find inputs whose current value looks like a date
-                    const inputs = document.querySelectorAll('input');
-                    for (const inp of inputs) {
-                        const val = (inp.value || '').trim();
-                        // Check for MM/DD/YYYY or YYYY-MM-DD format
-                        if (/^\\d{1,2}\\/\\d{1,2}\\/\\d{4}$/.test(val) ||
-                            /^\\d{4}-\\d{2}-\\d{2}$/.test(val)) {
-                            return {
-                                found: true,
-                                className: inp.className || '',
-                                id: inp.id || '',
-                                value: val,
-                            };
-                        }
-                    }
-                    return { found: false };
-                }
-            """)
-            if date_input and date_input.get("found"):
-                logger.info("Found date input with value '%s' (class=%s, id=%s)",
-                           date_input["value"], date_input.get("className", ""),
-                           date_input.get("id", ""))
-                # Build selector for this input
-                inp_id = date_input.get("id", "")
-                if inp_id:
-                    sel = f"#{inp_id}"
-                else:
-                    sel = f"input[value='{date_input['value']}']"
-                el = await page.query_selector(sel)
-                if el:
-                    await el.click(click_count=3)  # Triple-click to select all
-                    await el.fill(date_str)
-                    await el.press("Enter")
-                    logger.info("Set date input to: %s", date_str)
-                    await asyncio.sleep(2)
-                    await page.wait_for_load_state("networkidle", timeout=10000)
-                    return True
-        except Exception as e:
-            logger.debug("Date input strategy failed: %s", e)
+            el = await page.query_selector(date_input_sel)
+            if el and await el.is_visible():
+                current_val = await el.get_attribute("value") or ""
+                logger.info(
+                    "Found date picker input: current='%s', target='%s'",
+                    current_val, date_display,
+                )
 
-        # Strategy 2: Look for ActiveNet-specific next-day/previous-day arrows
-        # These are commonly near the date display
-        arrow_selectors = [
-            # ActiveNet-specific patterns
-            "button.arrow-right",
-            "button.arrow-next",
-            "[data-qa-id*='next']",
-            "[data-qa-id*='forward']",
-            ".navigate-next",
-            ".nav-next",
-            # Generic right/forward arrows
-            "button[aria-label*='next' i]",
-            "button[aria-label*='forward' i]",
-            "button[aria-label*='Next day' i]",
-            "button[aria-label*='right' i]",
-            # Icon-based arrows
-            "button .icon-chevron-right",
-            "button .icon-arrow-right",
-            ".chevron-right",
-            "button:has(.fa-chevron-right)",
-            "button:has(.fa-arrow-right)",
-            # Generic with class
-            "[class*='next' i]:not(a)",
-            "[class*='forward' i]",
-        ]
+                # Triple-click to select all text, then type new date
+                await el.click(click_count=3)
+                await asyncio.sleep(0.3)
+                await el.fill(date_display)
+                await asyncio.sleep(0.3)
+                await el.press("Enter")
+                logger.info("Filled date picker with: %s", date_display)
 
-        # Calculate how many times to click "next" to reach target date
-        today = date.today()
-        current_displayed = getattr(self, "_current_grid_date", today)
-        days_to_advance = (target_date - current_displayed).days
-
-        if days_to_advance > 0:
-            for sel in arrow_selectors:
+                # Wait for the SPA to react and fire a new availability API call
+                await asyncio.sleep(2)
                 try:
-                    el = await page.query_selector(sel)
-                    if el and await el.is_visible():
-                        for _ in range(days_to_advance):
-                            await el.click()
-                            await asyncio.sleep(0.5)
-                        self._current_grid_date = target_date
-                        logger.info(
-                            "Clicked next-day arrow %d times: %s",
-                            days_to_advance, sel,
-                        )
-                        await asyncio.sleep(1)
-                        await page.wait_for_load_state("networkidle", timeout=10000)
-                        return True
-                except Exception:
-                    continue
-
-        # Strategy 3: Try calendar day buttons
-        calendar_selectors = [
-            f"[data-date='{date_iso}']",
-            f"[data-date='{date_str}']",
-            f"[aria-label*='{target_date.strftime('%B')}'][aria-label*='{day_num}']",
-            f"td[data-day='{day_num}']",
-            f".calendar-day:has-text('{day_num}')",
-        ]
-        for sel in calendar_selectors:
-            try:
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    await el.click()
-                    logger.info("Clicked calendar day: %s", sel)
-                    await asyncio.sleep(1)
                     await page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+
+                # Verify the date actually changed
+                new_val = await el.get_attribute("value") or ""
+                if new_val != current_val:
+                    logger.info("Date picker value changed to: %s", new_val)
+                    self._current_grid_date = target_date
                     return True
-            except Exception:
-                continue
+                else:
+                    logger.warning(
+                        "Date picker value unchanged after fill (still '%s'). "
+                        "Trying keyboard input...", new_val,
+                    )
+
+                    # Fallback: use keyboard to type character by character
+                    # (some React inputs don't respond to fill())
+                    await el.click(click_count=3)
+                    await asyncio.sleep(0.2)
+                    await page.keyboard.press("Backspace")
+                    await asyncio.sleep(0.1)
+                    await page.keyboard.type(date_display, delay=50)
+                    await asyncio.sleep(0.3)
+                    await page.keyboard.press("Enter")
+                    await asyncio.sleep(2)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+
+                    new_val2 = await el.get_attribute("value") or ""
+                    if new_val2 != current_val:
+                        logger.info("Date changed via keyboard to: %s", new_val2)
+                        self._current_grid_date = target_date
+                        return True
+                    else:
+                        logger.warning("Keyboard input also failed to change date")
+        except Exception as e:
+            logger.warning("Date picker input strategy failed: %s", e)
+
+        # Strategy 2: Click input to open calendar popup, then click target day
+        try:
+            el = await page.query_selector(date_input_sel)
+            if el and await el.is_visible():
+                await el.click()
+                await asyncio.sleep(1)
+
+                # Look for the calendar popup and clickable day cells
+                # ActiveNet calendar days typically have data attributes or aria-labels
+                day_selectors = [
+                    f".an-date-picker__popper [data-date='{date_iso}']",
+                    f".an-date-picker__popper td[data-day='{target_date.day}']",
+                    f".an-date-picker__popper [aria-label*='{target_date.strftime('%B')} {target_date.day}']",
+                    f".an-date-picker__popper button:has-text('{target_date.day}')",
+                    f".an-date-picker__popper td:has-text('{target_date.day}')",
+                ]
+                for sel in day_selectors:
+                    try:
+                        day_el = await page.query_selector(sel)
+                        if day_el and await day_el.is_visible():
+                            await day_el.click()
+                            logger.info("Clicked calendar day via popup: %s", sel)
+                            await asyncio.sleep(2)
+                            try:
+                                await page.wait_for_load_state("networkidle", timeout=10000)
+                            except Exception:
+                                pass
+                            self._current_grid_date = target_date
+                            return True
+                    except Exception:
+                        continue
+
+                # Close the popup if nothing was clicked
+                await page.keyboard.press("Escape")
+        except Exception as e:
+            logger.debug("Calendar popup strategy failed: %s", e)
 
         logger.warning("Could not change date to %s — no matching UI element found", date_iso)
         return False

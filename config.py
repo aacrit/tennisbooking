@@ -2,10 +2,10 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # ActiveNet booking portal (Quick Reserve — the real court booking path)
+    # ActiveNet booking portal (facility reservation page)
     booking_url: str = (
         "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
-        "reservation/quick?onlineSiteId=0&from_original_cui=true&online=true"
+        "reservation?onlineSiteId=0&from_original_cui=true&locale=en-US"
     )
 
     # Scanning schedule (CT timezone)

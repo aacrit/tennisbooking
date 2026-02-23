@@ -262,6 +262,12 @@ class AvailabilityChecker:
                     url, type(body).__name__, len(json.dumps(body, default=str)),
                     body_str,
                 )
+                # Extra diagnostics for availability grid endpoint
+                if "quickreservation" in url_lower and "availability" in url_lower:
+                    logger.info(
+                        "AVAILABILITY API STRUCTURE: %s",
+                        self._describe_structure(body),
+                    )
             except Exception:
                 pass
 
@@ -1002,65 +1008,231 @@ class AvailabilityChecker:
         except Exception as e:
             logger.warning("DOM scraping error (targeted): %s", e)
 
-        # Strategy 2b: Broad DOM scan — find ALL elements with time text
+        # Strategy 2c: Grid-aware DOM scan — read the Quick Reserve
+        # availability grid, checking each cell's availability status.
+        # The grid has rows (resources) and columns (time slots).
+        # Available = white/clickable, Unavailable = gray/disabled.
+        strategy_counts["grid_dom"] = 0
         try:
-            broad_slots = await page.evaluate("""
+            grid_slots = await page.evaluate("""
                 () => {
                     const results = [];
-                    const timePattern = /\\d{1,2}:\\d{2}\\s*(AM|PM)/i;
+                    const timePattern = /^\\s*(\\d{1,2}:\\d{2}\\s*(?:AM|PM))\\s*$/i;
 
-                    // Walk all leaf-ish elements (small text content)
-                    document.querySelectorAll('td, div, span, li, a, button, p, label').forEach(el => {
-                        const fullText = (el.textContent || '').trim();
+                    // Find all table-like grid containers
+                    const tables = document.querySelectorAll('table, [role="grid"], [class*="grid"], [class*="schedule"], [class*="availability"]');
 
-                        if (fullText.length > 500) return; // Skip large containers
-                        if (!timePattern.test(fullText)) return;
+                    for (const table of tables) {
+                        // Extract column headers (time slots)
+                        const headers = [];
+                        const headerCells = table.querySelectorAll('thead th, thead td, tr:first-child th, tr:first-child td, [role="columnheader"]');
+                        headerCells.forEach(th => {
+                            const text = (th.textContent || '').trim();
+                            headers.push(text);
+                        });
 
-                        // Walk up to find context (facility name, date, etc.)
-                        let contextEl = el;
-                        let contextText = '';
-                        for (let i = 0; i < 5 && contextEl; i++) {
-                            contextEl = contextEl.parentElement;
-                            if (contextEl) {
-                                const ct = (contextEl.textContent || '').trim();
-                                if (ct.length < 1000 && ct.length > contextText.length) {
-                                    contextText = ct;
-                                }
+                        // Also try first row as headers if no thead
+                        if (headers.length === 0) {
+                            const firstRow = table.querySelector('tr');
+                            if (firstRow) {
+                                firstRow.querySelectorAll('td, th').forEach(td => {
+                                    headers.push((td.textContent || '').trim());
+                                });
                             }
                         }
 
-                        results.push({
-                            text: fullText.substring(0, 300),
-                            contextText: contextText.substring(0, 500),
-                            className: el.className || '',
-                            tag: el.tagName,
-                            parentClass: (el.parentElement?.className) || '',
-                            dataAttrs: Object.fromEntries(
-                                Array.from(el.attributes || [])
-                                    .filter(a => a.name.startsWith('data-'))
-                                    .map(a => [a.name, a.value])
-                            ),
-                            ariaLabel: el.getAttribute('aria-label') || '',
+                        // Find time columns (which headers contain times)
+                        const timeColumns = {};
+                        headers.forEach((h, i) => {
+                            const m = h.match(/\\d{1,2}:\\d{2}\\s*(?:AM|PM)/i);
+                            if (m) timeColumns[i] = m[0];
                         });
-                    });
+
+                        if (Object.keys(timeColumns).length < 3) continue;
+
+                        // Process data rows (skip header row)
+                        const rows = table.querySelectorAll('tr');
+                        for (let r = 1; r < rows.length; r++) {
+                            const cells = rows[r].querySelectorAll('td, th');
+                            // First cell is typically the resource name
+                            const resourceName = cells.length > 0 ? (cells[0].textContent || '').trim() : '';
+                            if (!resourceName || resourceName.length > 100) continue;
+
+                            // Check each time column cell
+                            for (const [colIdx, timeStr] of Object.entries(timeColumns)) {
+                                const idx = parseInt(colIdx);
+                                if (idx >= cells.length) continue;
+                                const cell = cells[idx];
+                                const cls = (cell.className || '').toLowerCase();
+                                const style = (cell.getAttribute('style') || '').toLowerCase();
+                                const ariaDisabled = cell.getAttribute('aria-disabled');
+                                const isLink = cell.querySelector('a, button') !== null || cell.tagName === 'A';
+
+                                // Check for NEGATIVE signals (unavailable)
+                                const isUnavailable = (
+                                    cls.includes('unavailable') ||
+                                    cls.includes('booked') ||
+                                    cls.includes('disabled') ||
+                                    cls.includes('closed') ||
+                                    cls.includes('blocked') ||
+                                    ariaDisabled === 'true' ||
+                                    style.includes('background') && (style.includes('gray') || style.includes('grey') || style.includes('#ccc') || style.includes('#ddd') || style.includes('#eee'))
+                                );
+
+                                // Check for POSITIVE signals (available)
+                                const isAvailable = (
+                                    cls.includes('available') ||
+                                    cls.includes('bookable') ||
+                                    cls.includes('open') ||
+                                    cls.includes('free') ||
+                                    isLink
+                                );
+
+                                // Only emit if available or at least not unavailable
+                                if (!isUnavailable && (isAvailable || (!cls.includes('header')))) {
+                                    results.push({
+                                        resourceName: resourceName.substring(0, 100),
+                                        time: timeStr,
+                                        className: cls.substring(0, 200),
+                                        hasLink: isLink,
+                                        isAvailable: isAvailable,
+                                        isUnavailable: isUnavailable,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // If no table-based grid found, try div-based grid
+                    if (results.length === 0) {
+                        // Look for row containers with resource names + time cells
+                        const rowContainers = document.querySelectorAll('[class*="resource-row"], [class*="facility-row"], [class*="lane-row"]');
+                        rowContainers.forEach(row => {
+                            const nameEl = row.querySelector('[class*="name"], [class*="label"], [class*="title"]');
+                            const resourceName = nameEl ? (nameEl.textContent || '').trim() : '';
+                            if (!resourceName) return;
+
+                            row.querySelectorAll('[class*="cell"], [class*="slot"], [class*="time"]').forEach(cell => {
+                                const text = (cell.textContent || '').trim();
+                                const m = text.match(/\\d{1,2}:\\d{2}\\s*(?:AM|PM)/i);
+                                if (!m) return;
+
+                                const cls = (cell.className || '').toLowerCase();
+                                const isUnavailable = cls.includes('unavailable') || cls.includes('booked') || cls.includes('disabled');
+                                const isAvailable = cls.includes('available') || cls.includes('bookable') || cls.includes('open');
+
+                                if (!isUnavailable) {
+                                    results.push({
+                                        resourceName: resourceName.substring(0, 100),
+                                        time: m[0],
+                                        className: cls.substring(0, 200),
+                                        hasLink: cell.querySelector('a, button') !== null,
+                                        isAvailable: isAvailable,
+                                        isUnavailable: isUnavailable,
+                                    });
+                                }
+                            });
+                        });
+                    }
 
                     return results;
                 }
             """)
 
-            if broad_slots:
-                logger.info("Broad DOM scan found %d elements with time text", len(broad_slots))
-                # Save for diagnostics
+            if grid_slots:
+                logger.info("Grid-aware DOM scan found %d cells", len(grid_slots))
                 self._save_diag_json(
-                    f"broad_dom_{target_date.isoformat()}.json", broad_slots
+                    f"grid_dom_{target_date.isoformat()}.json", grid_slots
                 )
-                for el in broad_slots:
-                    parsed = self._parse_dom_element_broad(el, target_date)
-                    if parsed:
-                        slots.append(parsed)
-                        strategy_counts["broad_dom"] += 1
+                for cell in grid_slots:
+                    court_name = cell.get("resourceName", "")
+                    time_str = cell.get("time", "")
+                    if court_name and time_str:
+                        # Parse time
+                        time_match = re.search(
+                            r'(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)', time_str
+                        )
+                        if time_match:
+                            hour = int(time_match.group(1))
+                            minute = int(time_match.group(2))
+                            ampm = time_match.group(3).upper()
+                            if ampm == "PM" and hour != 12:
+                                hour += 12
+                            elif ampm == "AM" and hour == 12:
+                                hour = 0
+                            slots.append({
+                                "date": target_date.isoformat(),
+                                "time": f"{hour:02d}:{minute:02d}",
+                                "court_name": court_name,
+                                "day_of_week": target_date.strftime("%A"),
+                                "duration_minutes": 60,
+                                "raw": {"source": "grid_dom_scan"},
+                            })
+                            strategy_counts["grid_dom"] += 1
         except Exception as e:
-            logger.warning("Broad DOM scan error: %s", e)
+            logger.warning("Grid-aware DOM scan error: %s", e)
+
+        # Strategy 2b: Broad DOM scan — find ALL elements with time text
+        # Only run as last resort if grid-aware scan found nothing
+        if not strategy_counts.get("grid_dom"):
+            try:
+                broad_slots = await page.evaluate("""
+                    () => {
+                        const results = [];
+                        const timePattern = /\\d{1,2}:\\d{2}\\s*(AM|PM)/i;
+
+                        // Walk all leaf-ish elements (small text content)
+                        document.querySelectorAll('td, div, span, li, a, button, p, label').forEach(el => {
+                            const fullText = (el.textContent || '').trim();
+
+                            if (fullText.length > 500) return; // Skip large containers
+                            if (!timePattern.test(fullText)) return;
+
+                            // Walk up to find context (facility name, date, etc.)
+                            let contextEl = el;
+                            let contextText = '';
+                            for (let i = 0; i < 5 && contextEl; i++) {
+                                contextEl = contextEl.parentElement;
+                                if (contextEl) {
+                                    const ct = (contextEl.textContent || '').trim();
+                                    if (ct.length < 1000 && ct.length > contextText.length) {
+                                        contextText = ct;
+                                    }
+                                }
+                            }
+
+                            results.push({
+                                text: fullText.substring(0, 300),
+                                contextText: contextText.substring(0, 500),
+                                className: el.className || '',
+                                tag: el.tagName,
+                                parentClass: (el.parentElement?.className) || '',
+                                dataAttrs: Object.fromEntries(
+                                    Array.from(el.attributes || [])
+                                        .filter(a => a.name.startsWith('data-'))
+                                        .map(a => [a.name, a.value])
+                                ),
+                                ariaLabel: el.getAttribute('aria-label') || '',
+                            });
+                        });
+
+                        return results;
+                    }
+                """)
+
+                if broad_slots:
+                    logger.info("Broad DOM scan found %d elements with time text", len(broad_slots))
+                    # Save for diagnostics
+                    self._save_diag_json(
+                        f"broad_dom_{target_date.isoformat()}.json", broad_slots
+                    )
+                    for el in broad_slots:
+                        parsed = self._parse_dom_element_broad(el, target_date)
+                        if parsed:
+                            slots.append(parsed)
+                            strategy_counts["broad_dom"] += 1
+            except Exception as e:
+                logger.warning("Broad DOM scan error: %s", e)
 
         # Strategy 3: Full page text analysis for time patterns
         if not slots:
@@ -1072,11 +1244,28 @@ class AvailabilityChecker:
             except Exception:
                 pass
 
+        # Post-processing safety net: if all broad_dom slots have the same
+        # court_name, they are likely column headers misidentified as slots.
+        if strategy_counts["broad_dom"] > 0:
+            broad_court_names = {
+                s["court_name"] for s in slots
+                if s.get("raw", {}).get("source") == "broad_dom_scan"
+            }
+            if len(broad_court_names) == 1 and strategy_counts["broad_dom"] > 3:
+                logger.warning(
+                    "Broad DOM safety net: all %d broad slots have same court_name='%s' — "
+                    "likely column headers, discarding",
+                    strategy_counts["broad_dom"], broad_court_names.pop(),
+                )
+                slots = [s for s in slots if s.get("raw", {}).get("source") != "broad_dom_scan"]
+                strategy_counts["broad_dom"] = 0
+
         logger.info(
-            "DOM extraction for %s: redux=%d targeted=%d broad=%d text=%d total=%d",
+            "DOM extraction for %s: redux=%d targeted=%d grid=%d broad=%d text=%d total=%d",
             target_date.isoformat(),
             strategy_counts["redux"], strategy_counts["targeted_dom"],
-            strategy_counts["broad_dom"], strategy_counts["text"], len(slots),
+            strategy_counts["grid_dom"], strategy_counts["broad_dom"],
+            strategy_counts["text"], len(slots),
         )
 
         return slots
@@ -1164,9 +1353,21 @@ class AvailabilityChecker:
         }
 
     def _parse_dom_element_broad(self, el: dict, target_date: date) -> dict | None:
-        """Parse DOM element with broader facility name matching (Strategy 2b)."""
+        """Parse DOM element with broader facility name matching (Strategy 2b).
+
+        Tightened to avoid false positives:
+        - Rejects header elements (th, class*=header)
+        - Rejects container elements (contextText with 3+ distinct facilities)
+        - Only uses FACILITY_RE for court name extraction (no generic fallback)
+        """
         text = el.get("text", "")
         if not text:
+            return None
+
+        # Reject header elements — these are column/row headers, not cells
+        tag = (el.get("tag", "") or "").upper()
+        class_name = (el.get("className", "") or "").lower()
+        if tag == "TH" or "header" in class_name or "column-header" in class_name:
             return None
 
         # Extract time
@@ -1186,27 +1387,28 @@ class AvailabilityChecker:
         time_str = f"{hour:02d}:{minute:02d}"
 
         # Check for negative signals in class
-        class_name = (el.get("className", "") or "").lower()
         if any(x in class_name for x in ["unavailable", "booked", "disabled", "closed"]):
             return None
 
+        # Reject container elements: if contextText contains 3+ distinct
+        # facility names, this element is a container (e.g. grid wrapper),
+        # not a specific availability cell.
+        context = el.get("contextText", "") or ""
+        context_facilities = FACILITY_RE.findall(context)
+        # Deduplicate
+        unique_facilities = set(f.strip().lower() for f in context_facilities)
+        if len(unique_facilities) > 2:
+            return None
+
         # Search for facility name in text, contextText, ariaLabel
+        # Only use FACILITY_RE — no generic fallback that matches
+        # Pickleball/Ball Machine/Field/Room/Lane
         court_name = ""
-        for source in [text, el.get("contextText", ""), el.get("ariaLabel", "")]:
+        for source in [text, context, el.get("ariaLabel", "")]:
             match = FACILITY_RE.search(source or "")
             if match:
                 court_name = match.group(1).strip()
                 break
-
-        # If no regex match, try generic name extraction from context
-        if not court_name:
-            context = el.get("contextText", "")
-            name_match = re.search(
-                r'([\w\s]+(?:Court|Ct|Field|Room|Lane|Machine)\s*\d*)',
-                context or "", re.IGNORECASE
-            )
-            if name_match:
-                court_name = name_match.group(1).strip()
 
         if not court_name:
             return None
@@ -1290,21 +1492,35 @@ class AvailabilityChecker:
             return fast
         return self._deep_extract_slots(data)
 
-    def _parse_captured_responses(self) -> list[dict]:
+    def _parse_captured_responses(self, current_date: date | None = None) -> list[dict]:
         """Parse captured API responses for availability data."""
         slots = []
+        if current_date is None:
+            current_date = date.today() + timedelta(days=1)
 
         for resp in self.captured_responses:
             data = resp.get("data")
             if not data:
                 continue
+            url = resp.get("url", "")
+
+            # Specialized path: Quick Reserve availability grid
+            if "quickreservation" in url.lower() and "availability" in url.lower():
+                grid_slots = self._parse_availability_grid(data, current_date)
+                if grid_slots:
+                    logger.info(
+                        "Grid parser found %d slots from %s",
+                        len(grid_slots), url,
+                    )
+                    slots.extend(grid_slots)
+                    continue
 
             # Fast path: known field names in flat list structures
             fast_slots = self._parse_response_fast(data)
             if fast_slots:
                 logger.info(
                     "Fast-path parsed %d slots from %s",
-                    len(fast_slots), resp.get("url", "?"),
+                    len(fast_slots), url,
                 )
                 slots.extend(fast_slots)
             else:
@@ -1313,7 +1529,7 @@ class AvailabilityChecker:
                 if deep_slots:
                     logger.info(
                         "Deep extraction found %d potential slots from %s",
-                        len(deep_slots), resp.get("url", "?"),
+                        len(deep_slots), url,
                     )
                     slots.extend(deep_slots)
 
@@ -1450,6 +1666,132 @@ class AvailabilityChecker:
                     slots.extend(
                         self._deep_extract_slots(item, f"{path}[{i}]", depth + 1)
                     )
+
+        return slots
+
+    # ── Availability grid parser ────────────────────────────────────
+
+    def _describe_structure(self, data, depth: int = 0, max_depth: int = 4) -> str:
+        """Describe the nested structure of a JSON object for diagnostics."""
+        if depth >= max_depth:
+            return f"({type(data).__name__})"
+        if isinstance(data, dict):
+            items = []
+            for k, v in list(data.items())[:20]:
+                items.append(f"{k}: {self._describe_structure(v, depth + 1, max_depth)}")
+            return "{" + ", ".join(items) + "}"
+        elif isinstance(data, list):
+            if not data:
+                return "[]"
+            return f"[{self._describe_structure(data[0], depth + 1, max_depth)} x{len(data)}]"
+        elif isinstance(data, str):
+            return f'str({len(data)})'
+        elif isinstance(data, bool):
+            return str(data)
+        elif isinstance(data, (int, float)):
+            return str(data)
+        else:
+            return f"({type(data).__name__})"
+
+    def _parse_availability_grid(self, data: dict, current_date: date) -> list[dict]:
+        """Parse the Quick Reserve availability API response grid.
+
+        The /rest/reservation/quickreservation/availability endpoint returns
+        a structured grid with time_slots and per-resource availability.
+        """
+        slots = []
+
+        # Navigate to body.availability (ActiveNet response wrapper)
+        body = data.get("body", data)
+        avail = body.get("availability", body)
+
+        if not isinstance(avail, dict):
+            logger.debug("Availability grid: no 'availability' dict found")
+            return []
+
+        time_slots = avail.get("time_slots", [])
+        if not time_slots:
+            logger.debug("Availability grid: no time_slots array")
+            return []
+
+        logger.info(
+            "Availability grid: %d time_slots, keys=%s",
+            len(time_slots), sorted(avail.keys()),
+        )
+
+        # Look for resource availability data in various possible structures
+        resources = (
+            avail.get("resources", [])
+            or avail.get("facilities", [])
+            or avail.get("resource_availability", [])
+            or avail.get("items", [])
+        )
+
+        # Also check for booking_slots / reservation_slots / slots arrays
+        if not resources:
+            for key in ["booking_slots", "reservation_slots", "slots",
+                        "facility_availability", "availability_data",
+                        "resource_data", "grid", "matrix", "cells",
+                        "date_availability"]:
+                val = avail.get(key)
+                if isinstance(val, list) and val:
+                    resources = val
+                    logger.info("Availability grid: found resource data in '%s' (%d items)", key, len(val))
+                    break
+
+        # If resources is a flat array of availability objects
+        if resources and isinstance(resources[0], dict):
+            for res in resources:
+                res_name = str(
+                    res.get("resource_name", "")
+                    or res.get("resourceName", "")
+                    or res.get("name", "")
+                    or res.get("facility_name", "")
+                    or res.get("facilityName", "")
+                    or res.get("title", "")
+                ).strip()
+
+                # Check for per-time-slot availability array
+                avail_arr = (
+                    res.get("availability", [])
+                    or res.get("available_slots", [])
+                    or res.get("time_availability", [])
+                    or res.get("slots", [])
+                )
+
+                if isinstance(avail_arr, list) and len(avail_arr) == len(time_slots):
+                    # Matrix format: availability[i] corresponds to time_slots[i]
+                    for i, ts in enumerate(time_slots):
+                        is_avail = avail_arr[i]
+                        if isinstance(is_avail, dict):
+                            is_avail = is_avail.get("available", is_avail.get("isAvailable", False))
+                        if is_avail:
+                            # Parse time string (could be "06:00:00" or "6:00 AM")
+                            time_str = str(ts).replace(":00:00", ":00").replace(" 00:00", ":00")
+                            if len(time_str.split(":")) == 3:
+                                # "06:00:00" → "06:00"
+                                time_str = ":".join(time_str.split(":")[:2])
+                            slots.append({
+                                "date": current_date.isoformat(),
+                                "time": time_str,
+                                "court_name": res_name,
+                                "day_of_week": current_date.strftime("%A"),
+                                "duration_minutes": avail.get("time_increment", 60),
+                                "raw": {"source": "availability_grid"},
+                            })
+
+        # Log what we found for diagnostics
+        if not resources:
+            # Dump all keys at every level so we can understand the structure
+            logger.info(
+                "Availability grid: no recognized resource arrays. Full structure: %s",
+                self._describe_structure(avail, max_depth=5),
+            )
+        else:
+            logger.info(
+                "Availability grid: parsed %d slots from %d resources",
+                len(slots), len(resources),
+            )
 
         return slots
 

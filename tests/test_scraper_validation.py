@@ -590,20 +590,22 @@ class TestScraperStrategy:
     """Verify the scraper uses the correct Quick Reserve URL."""
 
     def test_quick_reserve_url_uses_correct_path(self):
-        """QUICK_RESERVE_URL must use the reservation/quick path."""
+        """QUICK_RESERVE_URL must use the /reservation path (not /reservation/quick)."""
         from scraper.checker import QUICK_RESERVE_URL
-        assert "reservation/quick" in QUICK_RESERVE_URL
-        assert "online=true" in QUICK_RESERVE_URL
+        assert "/reservation?" in QUICK_RESERVE_URL
+        assert "reservation/quick" not in QUICK_RESERVE_URL
 
-    def test_config_booking_url_uses_quick_reserve(self):
-        """config.py default booking_url must point to Quick Reserve."""
+    def test_config_booking_url_uses_reservation(self):
+        """config.py default booking_url must point to reservation page."""
         s = Settings()
-        assert "reservation/quick" in s.booking_url
+        assert "/reservation?" in s.booking_url
+        assert "reservation/quick" not in s.booking_url
 
-    def test_whatsapp_booking_url_uses_quick_reserve(self):
-        """WhatsApp message footer URL must point to Quick Reserve."""
+    def test_whatsapp_booking_url_uses_reservation(self):
+        """WhatsApp message footer URL must point to reservation page."""
         from notifications.whatsapp import BOOKING_URL as WA_URL
-        assert "reservation/quick" in WA_URL
+        assert "/reservation?" in WA_URL
+        assert "reservation/quick" not in WA_URL
 
     def test_quick_reserve_method_exists(self):
         """_check_quick_reserve method should exist."""
@@ -640,3 +642,91 @@ class TestScraperStrategy:
         }
         result2 = checker._match_slot_to_resource(slot2, resources)
         assert result2 == ""
+
+
+# ===========================================================================
+# Tests 30-34: Broad DOM parser tightening
+# ===========================================================================
+
+class TestBroadDOMParser:
+    """Verify _parse_dom_element_broad rejects false positives."""
+
+    def test_rejects_header_elements(self):
+        """Broad parser must reject th/header elements (column headers)."""
+        checker = AvailabilityChecker(Settings())
+        tomorrow = date.today() + timedelta(days=1)
+
+        el = {
+            "text": "6:00 PM",
+            "tag": "TH",
+            "className": "time-header",
+            "contextText": "McFetridge Tennis Ct01 schedule 6:00 PM",
+        }
+        assert checker._parse_dom_element_broad(el, tomorrow) is None
+
+    def test_rejects_container_with_multiple_facilities(self):
+        """Broad parser must reject elements whose context has 3+ facility names."""
+        checker = AvailabilityChecker(Settings())
+        tomorrow = date.today() + timedelta(days=1)
+
+        el = {
+            "text": "6:00 PM",
+            "tag": "TD",
+            "className": "cell",
+            "contextText": (
+                "McFetridge Tennis Ct01 McFetridge Tennis Ct02 "
+                "McFetridge Pickleball Ct1 schedule"
+            ),
+        }
+        assert checker._parse_dom_element_broad(el, tomorrow) is None
+
+    def test_no_generic_regex_fallback(self):
+        """Broad parser must not match Pickleball/Ball Machine via generic regex."""
+        checker = AvailabilityChecker(Settings())
+        tomorrow = date.today() + timedelta(days=1)
+
+        # Element with only a generic court-like name, no FACILITY_RE match
+        el = {
+            "text": "6:00 PM",
+            "tag": "TD",
+            "className": "",
+            "contextText": "Gymnasium Room 3 available 6:00 PM",
+        }
+        assert checker._parse_dom_element_broad(el, tomorrow) is None
+
+    def test_accepts_valid_tennis_slot(self):
+        """Broad parser should accept a valid element with a single tennis court."""
+        checker = AvailabilityChecker(Settings())
+        tomorrow = date.today() + timedelta(days=1)
+
+        el = {
+            "text": "6:00 PM",
+            "tag": "TD",
+            "className": "available",
+            "contextText": "McFetridge Tennis Ct01 6:00 PM",
+            "ariaLabel": "",
+        }
+        result = checker._parse_dom_element_broad(el, tomorrow)
+        assert result is not None
+        assert result["time"] == "18:00"
+        assert "Tennis" in result["court_name"]
+
+    def test_rejects_pickleball_only_context(self):
+        """Broad parser must not match Pickleball-only context as tennis."""
+        checker = AvailabilityChecker(Settings())
+        tomorrow = date.today() + timedelta(days=1)
+
+        el = {
+            "text": "6:00 PM",
+            "tag": "TD",
+            "className": "",
+            "contextText": "McFetridge Pickleball1A 6:00 PM",
+            "ariaLabel": "",
+        }
+        # FACILITY_RE matches Pickleball, so court_name will be set.
+        # This is OK — the downstream parser.py ALLOWED_COURTS_RE will
+        # filter it to only Tennis Ct 1-6. The broad parser's job is
+        # just to not generate false positives.
+        result = checker._parse_dom_element_broad(el, tomorrow)
+        if result:
+            assert "Pickleball" in result["court_name"]

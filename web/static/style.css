@@ -25,6 +25,10 @@
     --blue-bg: rgba(0,122,255,0.1);
     --blue-border: rgba(0,122,255,0.2);
 
+    --yellow: #f5a623;
+    --yellow-bg: rgba(245,166,35,0.1);
+    --yellow-border: rgba(245,166,35,0.2);
+
     --radius-sm: 8px;
     --radius-md: 12px;
     --radius-lg: 16px;
@@ -201,18 +205,31 @@ body {
 .day-slots { display: flex; flex-direction: column; gap: 6px; flex: 1; }
 .slot-chip {
     display: flex; align-items: center; gap: 6px; padding: 7px 11px;
-    background: var(--green-bg); border: 1px solid var(--green-border); border-radius: var(--radius-sm);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
     text-decoration: none; cursor: pointer;
     transition: background 0.15s var(--ease), transform 0.15s var(--ease);
 }
-.slot-chip:hover { background: rgba(52,199,89,0.18); transform: translateX(2px); }
-.slot-time { font-size: 13px; font-weight: 600; color: var(--green); }
+.slot-chip:hover { transform: translateX(2px); }
+.slot-time { font-size: 13px; font-weight: 600; }
 .slot-court { font-size: 11px; color: var(--text-2); }
 .slot-arrow {
-    margin-left: auto; opacity: 0; color: var(--green); flex-shrink: 0;
+    margin-left: auto; opacity: 0; flex-shrink: 0;
     transition: opacity 0.15s var(--ease), transform 0.15s var(--ease);
 }
 .slot-chip:hover .slot-arrow { opacity: 1; transform: translateX(2px); }
+
+/* Prime time (6PM+ weekdays, all weekends) — green */
+.slot-prime { background: var(--green-bg); border-color: var(--green-border); }
+.slot-prime:hover { background: rgba(52,199,89,0.18); }
+.slot-prime .slot-time { color: var(--green); }
+.slot-prime .slot-arrow { color: var(--green); }
+
+/* Off-peak (before 6PM weekdays) — yellow */
+.slot-offpeak { background: var(--yellow-bg); border-color: var(--yellow-border); }
+.slot-offpeak:hover { background: rgba(245,166,35,0.18); }
+.slot-offpeak .slot-time { color: var(--yellow); }
+.slot-offpeak .slot-arrow { color: var(--yellow); }
+
 .slot-new {
     font-size: 9px; font-weight: 600; color: #fff; background: #ff9500;
     border-radius: 4px; padding: 1px 5px; text-transform: uppercase; letter-spacing: 0.03em;

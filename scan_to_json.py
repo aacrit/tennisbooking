@@ -31,6 +31,18 @@ OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "data
 OUT_PATH = os.path.join(OUT_DIR, "status.json")
 
 
+def _is_prime_time_str(time_str: str, date_str: str, settings: Settings) -> bool:
+    """Check if a slot is prime time from string representations."""
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d").date()
+        if d.weekday() >= 5:
+            return True
+        t = datetime.strptime(time_str.strip(), "%I:%M %p").time()
+        return t.hour >= settings.weekday_earliest_hour
+    except (ValueError, AttributeError):
+        return False
+
+
 def build_calendar(filtered_slots: list[dict]) -> list[dict]:
     """Build 6-day calendar from filtered slots (mirrors web/app.py _build_calendar)."""
     today = date.today()
@@ -42,14 +54,19 @@ def build_calendar(filtered_slots: list[dict]) -> list[dict]:
     for i in range(1, 7):
         d = today + timedelta(days=i)
         d_str = d.isoformat()
+        is_weekend = d.weekday() >= 5
         day_slots = grouped.get(d_str, [])
         calendar.append({
             "date": d_str,
             "date_display": d.strftime("%b %d"),
             "day_name": d.strftime("%a"),
-            "is_weekend": d.weekday() >= 5,
+            "is_weekend": is_weekend,
             "slots": [
-                {"slot_time": s["time"], "court_name": s.get("court_name", "")}
+                {
+                    "slot_time": s["time"],
+                    "court_name": s.get("court_name", ""),
+                    "is_prime_time": s.get("is_prime_time", is_weekend),
+                }
                 for s in day_slots
             ],
         })
@@ -153,14 +170,21 @@ async def main():
     wa_configured = bool(instance_id and api_token and chat_id)
 
     opened = changes.get("opened", [])
-    if opened:
+    # Only notify for prime-time slots (weekday 6PM+ or weekends)
+    prime_opened = [
+        s for s in opened
+        if _is_prime_time_str(s.get("time", ""), s.get("date", ""), settings)
+    ]
+    if prime_opened:
         if wa_configured:
             from notifications.whatsapp import send_whatsapp, format_slots_message
-            msg = format_slots_message(opened)
+            msg = format_slots_message(prime_opened)
             ok = send_whatsapp(instance_id, api_token, chat_id, msg)
-            logger.info("WhatsApp sent=%s for %d opened slots", ok, len(opened))
+            logger.info("WhatsApp sent=%s for %d prime-time opened slots (of %d total)", ok, len(prime_opened), len(opened))
         else:
-            logger.warning("WhatsApp NOT configured — skipping notification for %d opened slots", len(opened))
+            logger.warning("WhatsApp NOT configured — skipping notification for %d prime-time opened slots", len(prime_opened))
+    elif opened:
+        logger.info("Skipping WhatsApp: %d opened slots are off-peak only", len(opened))
 
     opened_count = len(changes.get("opened", []))
     closed_count = len(changes.get("closed", []))

@@ -119,12 +119,12 @@ def _filter_slots_base(raw_slots: list[dict], settings: Settings,
             logger.debug("Skipping slot with unparseable time: %s", slot.get("time"))
             continue
 
-        # Apply day-of-week filter
+        # Day-of-week classification
         day_of_week = slot_date.weekday()  # 0=Monday, 6=Sunday
         is_weekend = day_of_week >= 5
 
-        if not is_weekend and slot_time.hour < settings.weekday_earliest_hour:
-            continue
+        # Prime time: weekends (all hours) or weekday evenings (>= earliest hour)
+        is_prime_time = is_weekend or slot_time.hour >= settings.weekday_earliest_hour
 
         # Court name filter (caller decides tennis vs non-tennis)
         court_name = slot.get("court_name", "").strip()
@@ -144,6 +144,7 @@ def _filter_slots_base(raw_slots: list[dict], settings: Settings,
             "court_name": court_name,
             "day_of_week": slot_date.strftime("%A"),
             "is_weekend": is_weekend,
+            "is_prime_time": is_prime_time,
             "duration_minutes": slot.get("duration_minutes", 60),
         })
 

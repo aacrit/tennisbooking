@@ -82,9 +82,14 @@ async def run_full_scan() -> int:
                 current_set, scan_id, "playwright"
             )
 
-            # Notify on newly opened slots
-            if opened:
-                await _notify_opened_slots(opened)
+            # Notify only on prime-time slots (weekday 6PM+ or weekends)
+            prime_time_set = {
+                (s["date"], s["time"], s.get("court_name", ""))
+                for s in filtered if s.get("is_prime_time")
+            }
+            prime_opened = opened & prime_time_set
+            if prime_opened:
+                await _notify_opened_slots(prime_opened)
 
             # Refresh API context for the lightweight poller
             if settings.api_poll_enabled:
@@ -154,8 +159,14 @@ async def run_api_poll() -> int:
                 current_set, scan_id, "api_poll"
             )
 
-            if opened:
-                await _notify_opened_slots(opened)
+            # Notify only on prime-time slots (weekday 6PM+ or weekends)
+            prime_time_set = {
+                (s["date"], s["time"], s.get("court_name", ""))
+                for s in filtered if s.get("is_prime_time")
+            }
+            prime_opened = opened & prime_time_set
+            if prime_opened:
+                await _notify_opened_slots(prime_opened)
 
             if filtered or opened or closed:
                 logger.info(

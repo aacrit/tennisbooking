@@ -144,7 +144,8 @@
                         var court = s.court_name ? '<span class="slot-court">' + esc(s.court_name) + '</span>' : '';
                         var slotKey = day.date + '|' + s.slot_time + '|' + (s.court_name || '');
                         var newBadge = (!prevVisitSlots.has(slotKey)) ? '<span class="slot-new">NEW</span>' : '';
-                        return '<a class="slot-chip" href="' + BOOKING_URL + '" target="_blank" rel="noopener">' +
+                        var primeClass = s.is_prime_time ? 'slot-prime' : 'slot-offpeak';
+                        return '<a class="slot-chip ' + primeClass + '" href="' + BOOKING_URL + '" target="_blank" rel="noopener">' +
                             '<span class="slot-time">' + esc(s.slot_time) + '</span>' + court + newBadge +
                             '<svg class="slot-arrow" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>' +
                         '</a>';

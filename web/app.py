@@ -10,6 +10,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import db
+from config import Settings
+
+_settings = Settings()
 
 WEB_DIR = Path(__file__).parent
 app = FastAPI(title="Tennis Court Monitor")
@@ -23,6 +26,19 @@ _run_check_fn = None
 def set_check_fn(fn):
     global _run_check_fn
     _run_check_fn = fn
+
+
+def _is_prime_time(slot_time_str: str, slot_date_str: str) -> bool:
+    """Check if a slot is prime time (weekend or weekday >= 6PM)."""
+    try:
+        d = datetime.strptime(slot_date_str, "%Y-%m-%d").date()
+        if d.weekday() >= 5:  # Weekend
+            return True
+        # Parse 12-hour time like "06:00 PM"
+        t = datetime.strptime(slot_time_str.strip(), "%I:%M %p").time()
+        return t.hour >= _settings.weekday_earliest_hour
+    except (ValueError, AttributeError):
+        return False
 
 
 def _build_calendar(grouped_slots: dict) -> list[dict]:
@@ -52,9 +68,10 @@ async def dashboard(request: Request):
     slot_events = await db.get_slot_events(limit=20)
     last_scan = recent_scans[0] if recent_scans else None
 
-    # Group slots by date (all slots are tennis-only from current_slots table)
+    # Group slots by date, enriching with prime-time flag for color coding
     grouped = {}
     for slot in current_slots:
+        slot["is_prime_time"] = _is_prime_time(slot["slot_time"], slot["slot_date"])
         grouped.setdefault(slot["slot_date"], []).append(slot)
 
     calendar = _build_calendar(grouped)
@@ -77,9 +94,10 @@ async def api_status():
     slots = await db.get_current_availability()
     last = scans[0] if scans else None
 
-    # Group slots by date (all slots are tennis-only from current_slots table)
+    # Group slots by date, enriching with prime-time flag for color coding
     grouped = {}
     for slot in slots:
+        slot["is_prime_time"] = _is_prime_time(slot["slot_time"], slot["slot_date"])
         grouped.setdefault(slot["slot_date"], []).append(slot)
 
     calendar = _build_calendar(grouped)
@@ -92,7 +110,11 @@ async def api_status():
                 "day_name": day["day_name"],
                 "is_weekend": day["is_weekend"],
                 "slots": [
-                    {"slot_time": s["slot_time"], "court_name": s.get("court_name", "")}
+                    {
+                        "slot_time": s["slot_time"],
+                        "court_name": s.get("court_name", ""),
+                        "is_prime_time": s.get("is_prime_time", False),
+                    }
                     for s in day["slots"]
                 ],
             }

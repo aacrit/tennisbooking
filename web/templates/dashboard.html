@@ -72,7 +72,7 @@
                 <div class="day-slots">
                     {% if day.slots %}
                         {% for slot in day.slots %}
-                        <a class="slot-chip" href="https://anc.apm.activecommunities.com/chicagoparkdistrict/reservation?onlineSiteId=0&from_original_cui=true&locale=en-US" target="_blank" rel="noopener">
+                        <a class="slot-chip {{ 'slot-prime' if slot.is_prime_time else 'slot-offpeak' }}" href="https://anc.apm.activecommunities.com/chicagoparkdistrict/reservation?onlineSiteId=0&from_original_cui=true&locale=en-US" target="_blank" rel="noopener">
                             <span class="slot-time">{{ slot.slot_time }}</span>
                             {% if slot.court_name %}
                                 <span class="slot-court">{{ slot.court_name }}</span>
@@ -208,7 +208,8 @@
             if (hasSlots) {
                 slotsHtml = day.slots.map(function(s) {
                     var court = s.court_name ? '<span class="slot-court">' + esc(s.court_name) + '</span>' : '';
-                    return '<a class="slot-chip" href="' + BOOKING_URL + '" target="_blank" rel="noopener">' +
+                    var primeClass = s.is_prime_time ? 'slot-prime' : 'slot-offpeak';
+                    return '<a class="slot-chip ' + primeClass + '" href="' + BOOKING_URL + '" target="_blank" rel="noopener">' +
                         '<span class="slot-time">' + esc(s.slot_time) + '</span>' + court +
                         '<svg class="slot-arrow" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>' +
                     '</a>';

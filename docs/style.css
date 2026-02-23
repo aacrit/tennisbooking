@@ -19,6 +19,10 @@
     --red: #ff3b30;
     --red-bg: rgba(255,59,48,0.1);
 
+    --yellow: #f5a623;
+    --yellow-bg: rgba(245,166,35,0.1);
+    --yellow-border: rgba(245,166,35,0.2);
+
     --blue: #007aff;
     --blue-bg: rgba(0,122,255,0.1);
     --blue-border: rgba(0,122,255,0.2);
@@ -49,6 +53,9 @@
         --green-bg: rgba(52,199,89,0.15);
         --green-border: rgba(52,199,89,0.25);
         --red-bg: rgba(255,59,48,0.15);
+
+        --yellow-bg: rgba(245,166,35,0.15);
+        --yellow-border: rgba(245,166,35,0.25);
 
         --blue-bg: rgba(0,122,255,0.15);
         --blue-border: rgba(0,122,255,0.25);
@@ -189,18 +196,30 @@ body {
 .day-slots { display: flex; flex-direction: column; gap: 6px; flex: 1; }
 .slot-chip {
     display: flex; align-items: center; gap: 6px; padding: 7px 11px;
-    background: var(--green-bg); border: 1px solid var(--green-border); border-radius: var(--radius-sm);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
     text-decoration: none; cursor: pointer;
     transition: background 0.15s var(--ease), transform 0.15s var(--ease);
 }
-.slot-chip:hover { background: rgba(52,199,89,0.18); transform: translateX(2px); }
-.slot-time { font-size: 13px; font-weight: 600; color: var(--green); }
+.slot-chip:hover { transform: translateX(2px); }
+.slot-time { font-size: 13px; font-weight: 600; }
 .slot-court { font-size: 11px; color: var(--text-2); }
 .slot-arrow {
-    margin-left: auto; opacity: 0; color: var(--green); flex-shrink: 0;
+    margin-left: auto; opacity: 0; flex-shrink: 0;
     transition: opacity 0.15s var(--ease), transform 0.15s var(--ease);
 }
 .slot-chip:hover .slot-arrow { opacity: 1; transform: translateX(2px); }
+
+/* Prime time (6PM+ weekdays, all weekends) — green */
+.slot-prime { background: var(--green-bg); border-color: var(--green-border); }
+.slot-prime:hover { background: rgba(52,199,89,0.18); }
+.slot-prime .slot-time { color: var(--green); }
+.slot-prime .slot-arrow { color: var(--green); }
+
+/* Off-peak (before 6PM weekdays) — yellow */
+.slot-offpeak { background: var(--yellow-bg); border-color: var(--yellow-border); }
+.slot-offpeak:hover { background: rgba(245,166,35,0.18); }
+.slot-offpeak .slot-time { color: var(--yellow); }
+.slot-offpeak .slot-arrow { color: var(--yellow); }
 .slot-new {
     font-size: 9px; font-weight: 600; color: #fff; background: #ff9500;
     border-radius: 4px; padding: 1px 5px; text-transform: uppercase; letter-spacing: 0.03em;
@@ -295,44 +314,6 @@ details[open] > .feed-heading .chevron { transform: rotate(180deg); }
 .feed-meta { color: var(--text-3); margin-left: auto; }
 .feed-meta + .feed-meta { margin-left: 0; }
 .feed-empty { font-size: 12px; color: var(--text-3); padding: 8px; }
-
-/* ───── Non-Tennis Availability ───── */
-.other-availability {
-    margin-top: 24px; border-radius: var(--radius-md);
-}
-.other-heading {
-    display: flex; align-items: center; gap: 8px;
-    padding: 12px 12px; font-size: 13px; font-weight: 500; color: var(--text-2);
-    text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer;
-    border-radius: var(--radius-sm); transition: background 0.15s var(--ease); list-style: none;
-}
-.other-heading::-webkit-details-marker { display: none; }
-.other-heading::marker { content: ''; }
-.other-heading:hover { background: var(--surface-hover); }
-.other-heading .chevron { margin-left: auto; }
-details[open] > .other-heading .chevron { transform: rotate(180deg); }
-
-.other-count {
-    display: inline-flex; align-items: center; justify-content: center;
-    min-width: 20px; height: 20px; font-size: 11px; font-weight: 600;
-    color: #fff; background: var(--blue); border-radius: 999px; padding: 0 6px;
-}
-.other-badge {
-    background: var(--blue) !important;
-}
-.other-availability .calendar-grid { margin-top: 4px; }
-.other-slot-chip {
-    background: var(--blue-bg) !important;
-    border-color: var(--blue-border) !important;
-    cursor: default;
-}
-.other-slot-chip:hover {
-    background: rgba(0,122,255,0.18) !important;
-    transform: none;
-}
-.other-slot-chip .slot-time {
-    color: var(--blue) !important;
-}
 
 /* ───── Footer ───── */
 .page-footer {

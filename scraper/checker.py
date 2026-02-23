@@ -58,13 +58,13 @@ LEGACY_URL = (
     "ActiveNet_Home?FileName=onlinequickfacilityreserve.sdi"
 )
 
-# Broader facility name regex for non-tennis support
+# Facility name regex — only matches known McFetridge facility patterns.
+# Intentionally strict to avoid matching garbled SPA text or unrelated rooms.
 FACILITY_RE = re.compile(
     r'((?:McFetridge\s+)?(?:Tennis\s+(?:Ct|Court)\s*\d+|'
-    r'Pickleball\s*(?:Ct|Court)?\s*\d*|'
+    r'Pickleball\s+(?:Ct|Court)\s*\d*|'
     r'Ball\s+Machine\s*\d*|'
-    r'Court\s*\d+|Ct\s*\d+|'
-    r'(?:Tennis|Pickleball|Badminton|Volleyball)\s+\w+))',
+    r'McFetridge\s+(?:Ct|Court)\s*\d+))',
     re.IGNORECASE,
 )
 
@@ -451,32 +451,31 @@ class AvailabilityChecker:
         if match:
             return match.group(1).strip()
 
+        # Strip leading date fragments (e.g. "2026" prefix from SPA rendering)
+        name = re.sub(r'^\d{4}\s*', '', name).strip()
+
         # Strip common suffixes and keep meaningful prefix
         cleaned = re.sub(
             r'\s*(?:Court\s+Time|Reservation|Res\b|Registration).*$',
             '', name, flags=re.IGNORECASE,
         ).strip()
 
-        # Strip leading date fragments (e.g. "2026" prefix from SPA rendering)
-        cleaned = re.sub(r'^\d{4}\s*', '', cleaned).strip()
-
-        # If cleaning produced a very short/garbled result (< 5 chars),
-        # the SPA likely didn't render fully. Return a more descriptive name.
-        if len(cleaned) < 5:
-            # Try to salvage from the original name
-            salvaged = re.sub(
+        # If cleaning produced a short result, the SPA likely didn't render
+        # fully. Return the full cleaned text so _best_court_name() can
+        # evaluate it properly (and reject if too short).
+        if len(cleaned) < 8:
+            # Try to preserve more of the original name
+            fallback = re.sub(r'^\d{4}\s*', '', name).strip()
+            fallback = re.sub(
                 r'\s*(?:Court\s+Time|Reservation|Res\b|Registration).*$',
-                '', name, flags=re.IGNORECASE,
+                '', fallback, flags=re.IGNORECASE,
             ).strip()
-            salvaged = re.sub(r'^\d{4}\s*', '', salvaged).strip()
-            if len(salvaged) > len(cleaned):
-                cleaned = salvaged
-            # Still too short — use original (truncated) so it's at least diagnosable
-            if len(cleaned) < 5:
-                cleaned = name.strip()[:80]
+            if len(fallback) > len(cleaned):
+                cleaned = fallback
+            if len(cleaned) < 8:
                 logger.warning(
-                    "Activity name cleaning produced garbled result, "
-                    "using raw text: %r", cleaned,
+                    "Activity name cleaning produced short result: %r from %r",
+                    cleaned, name[:80],
                 )
 
         return cleaned[:60]
@@ -487,13 +486,24 @@ class AvailabilityChecker:
         activity-page name.
 
         Priority:
-        1. If the DOM name is a valid tennis court (Tennis Ct 1-6), keep it.
-        2. If the DOM name matches FACILITY_RE (any recognizable facility), keep it.
-        3. Otherwise, use the activity page name (if it's meaningful).
-        4. Fall back to whichever is non-empty.
+        1. If either name is a valid tennis court (Tennis Ct 1-6), prefer it.
+        2. If either name matches FACILITY_RE (recognizable facility), prefer it.
+        3. Use whichever is non-empty and at least 8 chars.
+        4. Fall back to "Unknown" rather than accepting garbled text.
         """
         dom_name = (dom_name or "").strip()
         activity_name = (activity_name or "").strip()
+
+        MIN_NAME_LEN = 8
+
+        # Reject very short names that don't match a known court pattern
+        # — they're likely garbled SPA output like "Act" or "ct 218"
+        if dom_name and len(dom_name) < MIN_NAME_LEN:
+            if not ALLOWED_COURTS_RE.search(dom_name):
+                dom_name = ""
+        if activity_name and len(activity_name) < MIN_NAME_LEN:
+            if not ALLOWED_COURTS_RE.search(activity_name):
+                activity_name = ""
 
         # DOM name is a recognized tennis court — always prefer it
         if dom_name and ALLOWED_COURTS_RE.search(dom_name):
@@ -507,12 +517,77 @@ class AvailabilityChecker:
         if activity_name and ALLOWED_COURTS_RE.search(activity_name):
             return activity_name
 
-        # Activity name looks like a real facility (longer than 5 chars)
-        if activity_name and len(activity_name) >= 5:
+        # Activity name matches facility regex
+        if activity_name and FACILITY_RE.search(activity_name):
             return activity_name
 
-        # Fall back to whatever is available
+        # Use longer name if it looks meaningful (>= MIN_NAME_LEN)
+        if activity_name and len(activity_name) >= MIN_NAME_LEN:
+            return activity_name
+        if dom_name and len(dom_name) >= MIN_NAME_LEN:
+            return dom_name
+
+        # Fall back — reject garbage
         return dom_name or activity_name or "Unknown"
+
+    def _extract_activity_name_from_responses(
+        self, responses: list[dict]
+    ) -> str:
+        """Try to extract a clean activity name from captured API JSON responses.
+
+        The /rest/activity/detail/{id} endpoint returns structured JSON with
+        the real activity name (e.g. "McFetridge Tennis Ct 1 Court Time").
+        This is far more reliable than DOM text which may not fully render.
+        """
+        NAME_KEYS = [
+            "activityName", "name", "title", "activity_name",
+            "facilityName", "facility_name", "activityTitle",
+        ]
+        WRAPPER_KEYS = ["body", "data", "result", "activity"]
+
+        for resp in responses:
+            url = resp.get("url", "")
+            # Focus on activity detail endpoints, skip button-status etc.
+            if "/activity/detail/" not in url:
+                continue
+            if any(skip in url for skip in ["/buttonstatus/", "/estimateprice/",
+                                             "/meetingandregistrationdates/"]):
+                continue
+
+            data = resp.get("data")
+            if not isinstance(data, dict):
+                continue
+
+            # Search top-level keys
+            for key in NAME_KEYS:
+                val = data.get(key, "")
+                if val and isinstance(val, str) and len(val) >= 10:
+                    candidate = self._clean_activity_name(val)
+                    if ALLOWED_COURTS_RE.search(candidate) or (
+                        FACILITY_RE.search(candidate) and len(candidate) >= 10
+                    ):
+                        logger.info("API name extraction: %r → %r", val[:80], candidate)
+                        return candidate
+
+            # Search inside nested wrappers
+            for wrapper in WRAPPER_KEYS:
+                inner = data.get(wrapper)
+                if not isinstance(inner, dict):
+                    continue
+                for key in NAME_KEYS:
+                    val = inner.get(key, "")
+                    if val and isinstance(val, str) and len(val) >= 10:
+                        candidate = self._clean_activity_name(val)
+                        if ALLOWED_COURTS_RE.search(candidate) or (
+                            FACILITY_RE.search(candidate) and len(candidate) >= 10
+                        ):
+                            logger.info(
+                                "API name extraction (nested): %r → %r",
+                                val[:80], candidate,
+                            )
+                            return candidate
+
+        return ""
 
     async def _check_activity_search(self, page: Page) -> list[dict]:
         """Search for McFetridge activities and extract availability.
@@ -686,6 +761,23 @@ class AvailabilityChecker:
                             clean_name = better
                             break
 
+                # Parse API responses captured DURING this activity's page load
+                new_responses = self.captured_responses[responses_before:]
+
+                # Try to upgrade clean_name from structured API JSON
+                # (more reliable than DOM text which may not render)
+                initial_clean = clean_name
+                api_name = self._extract_activity_name_from_responses(
+                    new_responses,
+                )
+                if api_name:
+                    clean_name = api_name
+
+                logger.info(
+                    "COURT_NAME: link_text=%r → clean=%r → api=%r → final=%r",
+                    name[:60], initial_clean, api_name or "none", clean_name,
+                )
+
                 # Extract from the activity detail page
                 target_dates = self._get_target_dates()
                 for td in target_dates:
@@ -696,8 +788,7 @@ class AvailabilityChecker:
                         )
                     slots.extend(page_slots)
 
-                # Parse API responses captured DURING this activity's page load
-                new_responses = self.captured_responses[responses_before:]
+                # Also parse slots from the captured API responses
                 for resp in new_responses:
                     per_activity_slots = self._parse_single_response(resp)
                     for s in per_activity_slots:

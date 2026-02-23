@@ -1,11 +1,9 @@
 name: Scan Tennis Courts
 
 on:
-  schedule:
-    # Backup scan every 2 hours during active hours (CT = UTC-6 during CST)
-    # Primary real-time detection runs on Fly.io; this is for the static dashboard.
-    - cron: '0 12,14,16,18,20,22,0,2,4 * * *'
-  workflow_dispatch: # Allow manual trigger from GitHub UI
+  # Scheduled scanning disabled — Fly.io is the primary scanner now.
+  # Use workflow_dispatch for manual debugging if needed.
+  workflow_dispatch:
 
 concurrency:
   group: scan

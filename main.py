@@ -20,7 +20,7 @@ from config import Settings
 from notifications.whatsapp import send_whatsapp, format_slots_message
 from scraper.checker import AvailabilityChecker
 from scraper.api_poller import APIPoller
-from scraper.parser import filter_slots, filter_other_slots
+from scraper.parser import filter_slots
 from web.app import app, set_check_fn
 
 # Logging
@@ -69,14 +69,9 @@ async def run_full_scan() -> int:
             filtered = filter_slots(raw_slots, settings)
             duration = _time.time() - start
 
-            # Also filter non-tennis slots (pickleball, ball machines, etc.)
-            other_filtered = filter_other_slots(raw_slots, settings)
-
             scan_id = await db.record_scan(True, None, len(filtered), duration)
             if filtered:
                 await db.save_slots(scan_id, filtered)
-            if other_filtered:
-                await db.save_slots(scan_id, other_filtered)
 
             # Change detection via current_slots table (tennis only)
             current_set = {
@@ -145,14 +140,11 @@ async def run_api_poll() -> int:
                 return 0
 
             filtered = filter_slots(raw_slots, settings)
-            other_filtered = filter_other_slots(raw_slots, settings)
             duration = _time.time() - start
 
             scan_id = await db.record_scan(True, None, len(filtered), duration)
             if filtered:
                 await db.save_slots(scan_id, filtered)
-            if other_filtered:
-                await db.save_slots(scan_id, other_filtered)
 
             current_set = {
                 (s["date"], s["time"], s.get("court_name", ""))

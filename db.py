@@ -256,8 +256,8 @@ async def get_current_availability() -> list[dict]:
     async with aiosqlite.connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "SELECT DISTINCT slot_date, slot_time, court_name, duration_minutes, day_of_week "
-            "FROM available_slots WHERE slot_date >= ? "
+            "SELECT slot_date, slot_time, court_name "
+            "FROM current_slots WHERE slot_date >= ? "
             "ORDER BY slot_date, slot_time",
             (today,),
         )

@@ -69,26 +69,6 @@
         <!-- Slot Changes -->
         <div id="changes-container"></div>
 
-        <!-- Non-Tennis Court Availability (collapsible) -->
-        <details class="other-availability" id="other-section">
-            <summary class="other-heading">
-                <span>Other McFetridge Activities</span>
-                <span class="other-count" id="other-count">0</span>
-                <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="6 9 12 15 18 9"></polyline>
-                </svg>
-            </summary>
-            <div class="calendar-scroll">
-                <div class="calendar-grid" id="other-calendar-grid">
-                    <div class="empty-hero">
-                        <div class="empty-icon">&#127935;</div>
-                        <div class="empty-title">No non-tennis slots</div>
-                        <div class="empty-body">No pickleball, ball machine, or other court availability found.</div>
-                    </div>
-                </div>
-            </div>
-        </details>
-
         <!-- Footer -->
         <div class="page-footer">
             <span>McFetridge Sports Center</span>
@@ -127,9 +107,6 @@
                 renderCount(data.total_slots || 0);
                 renderStatus(data);
                 renderChanges(data.changes || {});
-                renderOtherCalendar(data.other_calendar || []);
-                renderOtherCount(data.other_total_slots || 0);
-                autoExpandOther(data.total_slots || 0, data.other_total_slots || 0);
                 checkForegroundNotifications(data);
             } catch (e) {
                 console.error('Failed to load status:', e);
@@ -255,71 +232,6 @@
 
             html += '</div>';
             container.innerHTML = html;
-        }
-
-        // ── Other (Non-Tennis) Calendar ──
-        function renderOtherCalendar(calendar) {
-            var grid = document.getElementById('other-calendar-grid');
-            if (!grid) return;
-            var totalSlots = 0;
-            calendar.forEach(function(d) { totalSlots += (d.slots ? d.slots.length : 0); });
-
-            if (!calendar.length || totalSlots === 0) {
-                grid.innerHTML =
-                    '<div class="empty-hero">' +
-                        '<div class="empty-icon">&#127935;</div>' +
-                        '<div class="empty-title">No non-tennis slots</div>' +
-                        '<div class="empty-body">No pickleball, ball machine, or other court availability found.</div>' +
-                    '</div>';
-                return;
-            }
-
-            grid.innerHTML = calendar.map(function(day, i) {
-                var emptyClass = (!day.slots || day.slots.length === 0) ? ' day-empty' : '';
-                var hasSlots = day.slots && day.slots.length > 0;
-
-                var tag = '';
-                if (i === 0) {
-                    tag = '<span class="day-tag">Tomorrow</span>';
-                }
-
-                var countBadge = hasSlots ? '<span class="day-count other-badge">' + day.slots.length + '</span>' : '';
-
-                var slotsHtml;
-                if (hasSlots) {
-                    slotsHtml = day.slots.map(function(s) {
-                        var court = s.court_name ? '<span class="slot-court">' + esc(s.court_name) + '</span>' : '';
-                        return '<div class="slot-chip other-slot-chip">' +
-                            '<span class="slot-time">' + esc(s.slot_time) + '</span>' + court +
-                        '</div>';
-                    }).join('');
-                } else {
-                    slotsHtml = '<div class="no-slots">No availability</div>';
-                }
-
-                return '<div class="day-card other-day' + emptyClass + '">' +
-                    '<div class="day-header">' +
-                        '<span class="day-name">' + esc(day.day_name) + '</span>' +
-                        '<span class="day-date">' + esc(day.date_display) + '</span>' +
-                        countBadge + tag +
-                    '</div>' +
-                    '<div class="day-slots">' + slotsHtml + '</div>' +
-                '</div>';
-            }).join('');
-        }
-
-        function renderOtherCount(total) {
-            var el = document.getElementById('other-count');
-            if (el) el.textContent = total;
-        }
-
-        function autoExpandOther(tennisTotal, otherTotal) {
-            var section = document.getElementById('other-section');
-            if (!section) return;
-            // Auto-expand when tennis has no slots but other activities do
-            if (tennisTotal === 0 && otherTotal > 0) {
-                section.open = true;
-            }
         }
 
         // ── Countdown Timer ──

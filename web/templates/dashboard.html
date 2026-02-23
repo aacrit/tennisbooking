@@ -90,63 +90,6 @@
     </div>
 </div>
 
-<!-- Non-Tennis Court Availability (collapsible) -->
-<details class="other-availability" id="other-section">
-    <summary class="other-heading">
-        <span>Non-Tennis Court Availability</span>
-        <span class="other-count" id="other-count">{{ other_total_slots }}</span>
-        <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="6 9 12 15 18 9"></polyline>
-        </svg>
-    </summary>
-    <div class="calendar-scroll">
-        <div class="calendar-grid" id="other-calendar-grid">
-            {% set ons = namespace(other_total=0) %}
-            {% for day in other_calendar %}
-                {% set ons.other_total = ons.other_total + (day.slots|length) %}
-            {% endfor %}
-
-            {% if other_calendar|length > 0 and ons.other_total == 0 %}
-                <div class="empty-hero">
-                    <div class="empty-icon">&#127935;</div>
-                    <div class="empty-title">No non-tennis slots</div>
-                    <div class="empty-body">No pickleball, ball machine, or other court availability found.</div>
-                </div>
-            {% else %}
-                {% for day in other_calendar %}
-                <div class="day-card other-day {{ 'day-weekend' if day.is_weekend }}{{ ' day-empty' if not day.slots }}" data-date="{{ day.date }}">
-                    <div class="day-header">
-                        <span class="day-name">{{ day.day_name }}</span>
-                        <span class="day-date">{{ day.date_display }}</span>
-                        {% if day.slots %}
-                            <span class="day-count other-badge">{{ day.slots|length }}</span>
-                        {% endif %}
-                        {% if day.is_tomorrow %}
-                            <span class="day-tag">Tomorrow</span>
-                        {% elif day.is_weekend %}
-                            <span class="day-tag day-tag-weekend">{{ day.day_full }}</span>
-                        {% endif %}
-                    </div>
-                    <div class="day-slots">
-                        {% if day.slots %}
-                            {% for slot in day.slots %}
-                            <div class="slot-chip other-slot-chip">
-                                <span class="slot-time">{{ slot.slot_time }}</span>
-                                {% if slot.court_name %}
-                                    <span class="slot-court">{{ slot.court_name }}</span>
-                                {% endif %}
-                            </div>
-                            {% endfor %}
-                        {% else %}
-                            <div class="no-slots">No availability</div>
-                        {% endif %}
-                    </div>
-                </div>
-                {% endfor %}
-            {% endif %}
-        </div>
-    </div>
-</details>
 
 <!-- Activity Feed -->
 <div class="feed">
@@ -227,10 +170,6 @@
             updateCalendar(data.calendar);
             updateCount(data.total_slots);
             updateStatus(data);
-            if (data.other_calendar) {
-                updateOtherCalendar(data.other_calendar);
-                updateOtherCount(data.other_total_slots || 0);
-            }
         } catch (e) {
             console.error('Refresh failed:', e);
         }
@@ -311,64 +250,6 @@
             dot.className = 'pulse-dot pulse-red';
             text.textContent = 'Scan failed';
         }
-    }
-
-    function updateOtherCalendar(calendar) {
-        var grid = document.getElementById('other-calendar-grid');
-        if (!grid) return;
-        var totalSlots = 0;
-        calendar.forEach(function(d) { totalSlots += (d.slots ? d.slots.length : 0); });
-
-        if (calendar.length > 0 && totalSlots === 0) {
-            grid.innerHTML =
-                '<div class="empty-hero">' +
-                    '<div class="empty-icon">&#127935;</div>' +
-                    '<div class="empty-title">No non-tennis slots</div>' +
-                    '<div class="empty-body">No pickleball, ball machine, or other court availability found.</div>' +
-                '</div>';
-            return;
-        }
-
-        grid.innerHTML = calendar.map(function(day, i) {
-            var weekendClass = day.is_weekend ? ' day-weekend' : '';
-            var emptyClass = (!day.slots || day.slots.length === 0) ? ' day-empty' : '';
-            var hasSlots = day.slots && day.slots.length > 0;
-
-            var tag = '';
-            if (i === 0) {
-                tag = '<span class="day-tag">Tomorrow</span>';
-            } else if (day.is_weekend) {
-                tag = '<span class="day-tag day-tag-weekend">' + esc(DAY_FULL[day.day_name] || day.day_name) + '</span>';
-            }
-
-            var countBadge = hasSlots ? '<span class="day-count other-badge">' + day.slots.length + '</span>' : '';
-
-            var slotsHtml;
-            if (hasSlots) {
-                slotsHtml = day.slots.map(function(s) {
-                    var court = s.court_name ? '<span class="slot-court">' + esc(s.court_name) + '</span>' : '';
-                    return '<div class="slot-chip other-slot-chip">' +
-                        '<span class="slot-time">' + esc(s.slot_time) + '</span>' + court +
-                    '</div>';
-                }).join('');
-            } else {
-                slotsHtml = '<div class="no-slots">No availability</div>';
-            }
-
-            return '<div class="day-card other-day' + weekendClass + emptyClass + '">' +
-                '<div class="day-header">' +
-                    '<span class="day-name">' + esc(day.day_name) + '</span>' +
-                    '<span class="day-date">' + esc(day.date_display) + '</span>' +
-                    countBadge + tag +
-                '</div>' +
-                '<div class="day-slots">' + slotsHtml + '</div>' +
-            '</div>';
-        }).join('');
-    }
-
-    function updateOtherCount(total) {
-        var el = document.getElementById('other-count');
-        if (el) el.textContent = total;
     }
 
     function esc(str) {

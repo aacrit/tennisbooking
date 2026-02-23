@@ -17,7 +17,7 @@ import pytz
 
 from config import Settings
 from scraper.checker import AvailabilityChecker
-from scraper.parser import filter_slots, filter_other_slots
+from scraper.parser import filter_slots
 
 logging.basicConfig(
     level=logging.DEBUG if os.environ.get("SCRAPER_DEBUG") else logging.INFO,
@@ -127,8 +127,6 @@ async def main():
             "calendar": calendar,
             "total_slots": 0,
             "changes": compute_changes(old_status, calendar, now_ct),
-            "other_calendar": build_calendar([]),
-            "other_total_slots": 0,
         })
         # Don't sys.exit(1) — let the workflow commit the failure status
         # so the dashboard shows when the last attempt was made
@@ -139,11 +137,6 @@ async def main():
     total_slots = sum(len(day["slots"]) for day in calendar)
     changes = compute_changes(old_status, calendar, now_ct)
 
-    # Non-tennis slots (pickleball, ball machines, etc.)
-    other_filtered = filter_other_slots(raw_slots, settings)
-    other_calendar = build_calendar(other_filtered)
-    other_total_slots = sum(len(day["slots"]) for day in other_calendar)
-
     write_json({
         "last_scan_time": now_ct,
         "last_scan_success": True,
@@ -151,8 +144,6 @@ async def main():
         "calendar": calendar,
         "total_slots": total_slots,
         "changes": changes,
-        "other_calendar": other_calendar,
-        "other_total_slots": other_total_slots,
     })
 
     # Send WhatsApp notification for newly opened slots

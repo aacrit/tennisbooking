@@ -1207,9 +1207,7 @@ class AvailabilityChecker:
                 # Extract available slots from DOM only if API didn't find
                 # any for this date (they represent the same grid — API is
                 # more reliable with exact resource names and times).
-                # Also extract DOM for first date to cross-validate API.
-                is_first_date = (target_date == dates[0])
-                if api_slots_for_date and not is_first_date:
+                if api_slots_for_date:
                     logger.info(
                         "Skipping DOM extraction for %s — API already "
                         "parsed %d slots",
@@ -1231,20 +1229,7 @@ class AvailabilityChecker:
                             if matched:
                                 slot["court_name"] = matched
 
-                    # Cross-validate: compare API vs DOM for first date
-                    if is_first_date and api_slots_for_date:
-                        logger.info(
-                            "CROSS-VALIDATE %s: API=%d available, DOM=%d available "
-                            "(DOM non-disabled cells — if DOM << API, "
-                            "status=0 may mean 'permission' not 'available')",
-                            target_date.isoformat(),
-                            len(api_slots_for_date),
-                            len(page_slots),
-                        )
-                        # Don't double-count — use API data for first date
-                        # (DOM is only for validation)
-                    else:
-                        slots.extend(page_slots)
+                    slots.extend(page_slots)
             else:
                 # Grid never loaded — try direct API call as last resort
                 direct_slots = await self._try_direct_availability_api(

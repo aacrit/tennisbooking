@@ -401,9 +401,14 @@ class AvailabilityChecker:
         await asyncio.sleep(3)
         await page.wait_for_load_state("networkidle", timeout=15000)
 
+        # Initialize date tracking — the grid loads with today's date
+        self._current_grid_date = date.today()
+        self._date_picker_logged = False
+
         await self._save_diag(page, "after_facility_select")
 
         slots = []
+        total_api_slots = 0
 
         # Extract resource names from the page
         resource_names = await self._extract_resource_names(page)
@@ -411,6 +416,9 @@ class AvailabilityChecker:
             "Found %d resources on Quick Reserve page: %s",
             len(resource_names), resource_names,
         )
+
+        # Track how many API responses we've already processed
+        api_responses_processed = len(self.captured_responses)
 
         # Iterate through target dates
         target_dates = self._get_target_dates()
@@ -422,6 +430,18 @@ class AvailabilityChecker:
                 await asyncio.sleep(2)
 
             await self._save_diag(page, f"date_{target_date.isoformat()}")
+
+            # Parse any NEW captured API responses with this date
+            new_responses = self.captured_responses[api_responses_processed:]
+            if new_responses:
+                api_slots = self._parse_captured_responses(
+                    current_date=target_date,
+                    responses=new_responses,
+                )
+                if api_slots:
+                    slots.extend(api_slots)
+                    total_api_slots += len(api_slots)
+                api_responses_processed = len(self.captured_responses)
 
             # Extract available slots from DOM
             page_slots = await self._extract_slots_from_dom(page, target_date)
@@ -436,10 +456,13 @@ class AvailabilityChecker:
 
             slots.extend(page_slots)
 
-        # Also check captured API responses for slot data
-        api_slots = self._parse_captured_responses()
-        if api_slots:
-            slots.extend(api_slots)
+        # Parse any remaining API responses not yet processed
+        remaining = self.captured_responses[api_responses_processed:]
+        if remaining:
+            api_slots = self._parse_captured_responses(responses=remaining)
+            if api_slots:
+                slots.extend(api_slots)
+                total_api_slots += len(api_slots)
 
         await self._dump_dom_structure(page, "dom_quick_reserve_final")
 
@@ -447,7 +470,7 @@ class AvailabilityChecker:
             "QUICK RESERVE SUMMARY: captured_responses=%d, network_urls=%d, "
             "dom_slots=%d, api_slots=%d, total=%d, resources=%d",
             len(self.captured_responses), len(self.all_network_urls),
-            len(slots) - len(api_slots), len(api_slots), len(slots),
+            len(slots) - total_api_slots, total_api_slots, len(slots),
             len(resource_names),
         )
 
@@ -847,35 +870,204 @@ class AvailabilityChecker:
     # ── Date selection ───────────────────────────────────────────────
 
     async def _try_select_date(self, page: Page, target_date: date) -> bool:
-        """Try to select a specific date in the booking calendar."""
+        """Try to select a specific date in the booking calendar.
+
+        ActiveNet Quick Reserve uses either:
+        1. A date input field (text input with MM/DD/YYYY format)
+        2. Left/right arrow buttons to navigate day by day
+        3. A calendar popup with clickable day cells
+        """
         date_str = target_date.strftime("%m/%d/%Y")
         date_iso = target_date.isoformat()
-        date_mmdd = target_date.strftime("%m/%d")
         day_num = str(target_date.day)
 
-        # Try date input fields
-        date_inputs = await page.query_selector_all(
-            "input[type='date'], input[name*='date' i], input[id*='date' i], "
-            "input[placeholder*='date' i], input[class*='date' i]"
-        )
-        for inp in date_inputs:
+        # First time only: log what date-related elements exist on the page
+        if not hasattr(self, "_date_picker_logged"):
+            self._date_picker_logged = True
             try:
-                await inp.fill("")
-                await inp.fill(date_str)
-                await inp.press("Enter")
-                logger.info("Filled date input: %s", date_str)
-                return True
-            except Exception:
-                continue
+                date_elements = await page.evaluate("""
+                    () => {
+                        const results = [];
+                        // Look for date-related inputs, buttons, and controls
+                        const selectors = [
+                            'input[type="date"]',
+                            'input[class*="date" i]',
+                            'input[id*="date" i]',
+                            'input[name*="date" i]',
+                            'input[placeholder*="date" i]',
+                            'input[placeholder*="/" i]',
+                            'input[class*="picker" i]',
+                            '[class*="datepicker" i]',
+                            '[class*="date-picker" i]',
+                            '[class*="calendar" i]',
+                            '[data-qa-id*="date" i]',
+                            '[aria-label*="date" i]',
+                            '[class*="an-date" i]',
+                            'button[class*="arrow" i]',
+                            'button[class*="chevron" i]',
+                            'button[class*="prev" i]',
+                            'button[class*="next" i]',
+                            '[class*="navigate" i]',
+                            'button[aria-label*="previous" i]',
+                            'button[aria-label*="next" i]',
+                            'button[aria-label*="forward" i]',
+                            'button[aria-label*="backward" i]',
+                        ];
+                        for (const sel of selectors) {
+                            document.querySelectorAll(sel).forEach(el => {
+                                results.push({
+                                    selector: sel,
+                                    tag: el.tagName,
+                                    type: el.type || '',
+                                    className: (el.className || '').substring(0, 200),
+                                    id: el.id || '',
+                                    value: (el.value || '').substring(0, 50),
+                                    text: (el.textContent || '').trim().substring(0, 100),
+                                    ariaLabel: el.getAttribute('aria-label') || '',
+                                    dataQaId: el.getAttribute('data-qa-id') || '',
+                                    visible: el.offsetParent !== null,
+                                });
+                            });
+                        }
+                        return results;
+                    }
+                """)
+                if date_elements:
+                    logger.info(
+                        "Date picker elements found (%d): %s",
+                        len(date_elements),
+                        json.dumps(date_elements[:20], indent=2)[:3000],
+                    )
+                else:
+                    logger.info("No date picker elements found with standard selectors")
 
-        # Try calendar day buttons (common in date pickers)
+                # Also check for any visible text inputs (ActiveNet may use plain text input)
+                all_inputs = await page.evaluate("""
+                    () => {
+                        const results = [];
+                        document.querySelectorAll('input[type="text"], input:not([type])').forEach(el => {
+                            if (el.offsetParent !== null) {
+                                results.push({
+                                    tag: 'INPUT',
+                                    type: el.type || 'text',
+                                    className: (el.className || '').substring(0, 200),
+                                    id: el.id || '',
+                                    value: (el.value || '').substring(0, 50),
+                                    placeholder: el.placeholder || '',
+                                    ariaLabel: el.getAttribute('aria-label') || '',
+                                });
+                            }
+                        });
+                        return results;
+                    }
+                """)
+                if all_inputs:
+                    logger.info("Visible text inputs: %s", json.dumps(all_inputs[:10])[:1000])
+            except Exception as e:
+                logger.warning("Date picker diagnostics error: %s", e)
+
+        # Strategy 1: ActiveNet date input — look for text input showing a date
+        # ActiveNet may use a text input with MM/DD/YYYY or similar format
+        try:
+            date_input = await page.evaluate("""
+                () => {
+                    // Find inputs whose current value looks like a date
+                    const inputs = document.querySelectorAll('input');
+                    for (const inp of inputs) {
+                        const val = (inp.value || '').trim();
+                        // Check for MM/DD/YYYY or YYYY-MM-DD format
+                        if (/^\\d{1,2}\\/\\d{1,2}\\/\\d{4}$/.test(val) ||
+                            /^\\d{4}-\\d{2}-\\d{2}$/.test(val)) {
+                            return {
+                                found: true,
+                                className: inp.className || '',
+                                id: inp.id || '',
+                                value: val,
+                            };
+                        }
+                    }
+                    return { found: false };
+                }
+            """)
+            if date_input and date_input.get("found"):
+                logger.info("Found date input with value '%s' (class=%s, id=%s)",
+                           date_input["value"], date_input.get("className", ""),
+                           date_input.get("id", ""))
+                # Build selector for this input
+                inp_id = date_input.get("id", "")
+                if inp_id:
+                    sel = f"#{inp_id}"
+                else:
+                    sel = f"input[value='{date_input['value']}']"
+                el = await page.query_selector(sel)
+                if el:
+                    await el.click(click_count=3)  # Triple-click to select all
+                    await el.fill(date_str)
+                    await el.press("Enter")
+                    logger.info("Set date input to: %s", date_str)
+                    await asyncio.sleep(2)
+                    await page.wait_for_load_state("networkidle", timeout=10000)
+                    return True
+        except Exception as e:
+            logger.debug("Date input strategy failed: %s", e)
+
+        # Strategy 2: Look for ActiveNet-specific next-day/previous-day arrows
+        # These are commonly near the date display
+        arrow_selectors = [
+            # ActiveNet-specific patterns
+            "button.arrow-right",
+            "button.arrow-next",
+            "[data-qa-id*='next']",
+            "[data-qa-id*='forward']",
+            ".navigate-next",
+            ".nav-next",
+            # Generic right/forward arrows
+            "button[aria-label*='next' i]",
+            "button[aria-label*='forward' i]",
+            "button[aria-label*='Next day' i]",
+            "button[aria-label*='right' i]",
+            # Icon-based arrows
+            "button .icon-chevron-right",
+            "button .icon-arrow-right",
+            ".chevron-right",
+            "button:has(.fa-chevron-right)",
+            "button:has(.fa-arrow-right)",
+            # Generic with class
+            "[class*='next' i]:not(a)",
+            "[class*='forward' i]",
+        ]
+
+        # Calculate how many times to click "next" to reach target date
+        today = date.today()
+        current_displayed = getattr(self, "_current_grid_date", today)
+        days_to_advance = (target_date - current_displayed).days
+
+        if days_to_advance > 0:
+            for sel in arrow_selectors:
+                try:
+                    el = await page.query_selector(sel)
+                    if el and await el.is_visible():
+                        for _ in range(days_to_advance):
+                            await el.click()
+                            await asyncio.sleep(0.5)
+                        self._current_grid_date = target_date
+                        logger.info(
+                            "Clicked next-day arrow %d times: %s",
+                            days_to_advance, sel,
+                        )
+                        await asyncio.sleep(1)
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                        return True
+                except Exception:
+                    continue
+
+        # Strategy 3: Try calendar day buttons
         calendar_selectors = [
             f"[data-date='{date_iso}']",
             f"[data-date='{date_str}']",
             f"[aria-label*='{target_date.strftime('%B')}'][aria-label*='{day_num}']",
             f"td[data-day='{day_num}']",
             f".calendar-day:has-text('{day_num}')",
-            f"[class*='day']:has-text('{day_num}')",
         ]
         for sel in calendar_selectors:
             try:
@@ -883,29 +1075,13 @@ class AvailabilityChecker:
                 if el and await el.is_visible():
                     await el.click()
                     logger.info("Clicked calendar day: %s", sel)
+                    await asyncio.sleep(1)
+                    await page.wait_for_load_state("networkidle", timeout=10000)
                     return True
             except Exception:
                 continue
 
-        # Try next/forward buttons to navigate to the right date
-        nav_selectors = [
-            "[class*='next']",
-            "[aria-label*='next']",
-            "[class*='forward']",
-            "button:has-text('>')",
-            "button:has-text('Next')",
-        ]
-        for sel in nav_selectors:
-            try:
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    await el.click()
-                    logger.info("Clicked date nav: %s", sel)
-                    await asyncio.sleep(1)
-                    break
-            except Exception:
-                continue
-
+        logger.warning("Could not change date to %s — no matching UI element found", date_iso)
         return False
 
     # ── Slot extraction from DOM ─────────────────────────────────────
@@ -1453,13 +1629,20 @@ class AvailabilityChecker:
             return fast
         return self._deep_extract_slots(data)
 
-    def _parse_captured_responses(self, current_date: date | None = None) -> list[dict]:
+    def _parse_captured_responses(
+        self,
+        current_date: date | None = None,
+        responses: list[dict] | None = None,
+    ) -> list[dict]:
         """Parse captured API responses for availability data."""
         slots = []
         if current_date is None:
             current_date = date.today() + timedelta(days=1)
 
-        for resp in self.captured_responses:
+        if responses is None:
+            responses = self.captured_responses
+
+        for resp in responses:
             data = resp.get("data")
             if not data:
                 continue
@@ -1496,13 +1679,13 @@ class AvailabilityChecker:
 
         logger.info(
             "API parsing: %d total slots from %d captured responses",
-            len(slots), len(self.captured_responses),
+            len(slots), len(responses),
         )
 
         # Save extraction diagnostics
-        if self.captured_responses:
+        if responses:
             self._save_diag_json("api_extraction.json", {
-                "total_responses": len(self.captured_responses),
+                "total_responses": len(responses),
                 "total_slots_found": len(slots),
                 "slots": [
                     {"time": s["time"], "date": s["date"], "court_name": s["court_name"]}

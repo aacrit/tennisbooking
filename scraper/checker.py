@@ -32,13 +32,13 @@ AVAILABILITY_API_PATTERNS = [
     "/enrollment",
 ]
 
-# Quick Reserve URL — the actual court booking path.
-# The legacy quick-reserve SDI page redirects here.  This is the entry point
-# that real users reach when they click "Make a Reservation" on
-# mcfetridgesportscenter.com.
+# Facility reservation URL — the actual court booking path.
+# mcfetridgesportscenter.com "Book Court Time" links to
+# apm.activecommunities.com/chicagoparkdistrict/Reserve_Options which
+# redirects here.  Note: /reservation/quick returns 404 as of Feb 2026.
 QUICK_RESERVE_URL = (
     "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
-    "reservation/quick?onlineSiteId=0&from_original_cui=true&online=true"
+    "reservation?onlineSiteId=0&from_original_cui=true&locale=en-US"
 )
 
 # Activity search — fallback; searches for tennis court time activities

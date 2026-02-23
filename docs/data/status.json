@@ -1,15 +1,8 @@
 {
-  "last_scan_time": "2026-02-22 16:19:15 CT",
+  "last_scan_time": "2026-02-22 19:30:14 CT",
   "last_scan_success": true,
   "slots_found": 0,
   "calendar": [
-    {
-      "date": "2026-02-23",
-      "date_display": "Feb 23",
-      "day_name": "Mon",
-      "is_weekend": false,
-      "slots": []
-    },
     {
       "date": "2026-02-24",
       "date_display": "Feb 24",
@@ -44,39 +37,22 @@
       "day_name": "Sat",
       "is_weekend": true,
       "slots": []
+    },
+    {
+      "date": "2026-03-01",
+      "date_display": "Mar 01",
+      "day_name": "Sun",
+      "is_weekend": true,
+      "slots": []
     }
   ],
   "total_slots": 0,
   "changes": {
-    "since": "2026-02-22 14:20:37 CT",
+    "since": "2026-02-22 16:19:15 CT",
     "opened": [],
     "closed": []
   },
   "other_calendar": [
-    {
-      "date": "2026-02-23",
-      "date_display": "Feb 23",
-      "day_name": "Mon",
-      "is_weekend": false,
-      "slots": [
-        {
-          "slot_time": "06:15 PM",
-          "court_name": "Dance - Acrobatics - Teen/Preteen 1 at McFetridge"
-        },
-        {
-          "slot_time": "07:15 PM",
-          "court_name": "Dance - Acrobatics - Teen/Preteen 2 at McFetridge"
-        },
-        {
-          "slot_time": "09:50 PM",
-          "court_name": "Adult Ice Hockey League at McFetridge"
-        },
-        {
-          "slot_time": "11:00 PM",
-          "court_name": "Adult Ice Hockey League at McFetridge"
-        }
-      ]
-    },
     {
       "date": "2026-02-24",
       "date_display": "Feb 24",
@@ -212,7 +188,47 @@
           "court_name": "Adult Ice Hockey League at McFetridge"
         }
       ]
+    },
+    {
+      "date": "2026-03-01",
+      "date_display": "Mar 01",
+      "day_name": "Sun",
+      "is_weekend": true,
+      "slots": [
+        {
+          "slot_time": "09:00 AM",
+          "court_name": "Adult Ice Hockey League at McFetridge"
+        },
+        {
+          "slot_time": "09:00 AM",
+          "court_name": "Adult Learn to Play Hockey at McFetridge"
+        },
+        {
+          "slot_time": "09:00 AM",
+          "court_name": "Adult/Child Music & Movement at McFetridge"
+        },
+        {
+          "slot_time": "10:50 AM",
+          "court_name": "Adult Learn to Play Hockey at McFetridge"
+        },
+        {
+          "slot_time": "06:15 PM",
+          "court_name": "Dance - Acrobatics - Teen/Preteen 1 at McFetridge"
+        },
+        {
+          "slot_time": "07:15 PM",
+          "court_name": "Dance - Acrobatics - Teen/Preteen 2 at McFetridge"
+        },
+        {
+          "slot_time": "09:50 PM",
+          "court_name": "Adult Ice Hockey League at McFetridge"
+        },
+        {
+          "slot_time": "11:00 PM",
+          "court_name": "Adult Ice Hockey League at McFetridge"
+        }
+      ]
     }
   ],
-  "other_total_slots": 28
+  "other_total_slots": 32
 }

@@ -61,7 +61,7 @@ async def run_full_scan() -> int:
         logger.info("Starting full Playwright scan...")
 
         try:
-            checker = AvailabilityChecker(settings)
+            checker = AvailabilityChecker(settings, diag_dir="data/diag")
             # Timeout after 3 minutes to prevent Playwright hangs
             raw_slots = await asyncio.wait_for(
                 checker.check_availability(), timeout=180

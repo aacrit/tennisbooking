@@ -255,7 +255,13 @@ class AvailabilityChecker:
             try:
                 body = await response.json()
                 self.captured_responses.append({"url": url, "data": body})
-                logger.info("Captured API response: %s", url)
+                # Log response summary
+                body_str = json.dumps(body, default=str)[:2000]
+                logger.info(
+                    "Captured API response: %s (type=%s, size=%d, preview=%.500s)",
+                    url, type(body).__name__, len(json.dumps(body, default=str)),
+                    body_str,
+                )
             except Exception:
                 pass
 
@@ -362,11 +368,27 @@ class AvailabilityChecker:
         await asyncio.sleep(4)
 
         await self._save_diag(page, "quick_reserve_loaded")
-        await self._dump_dom_structure(page, "dom_quick_reserve")
 
         # Log the current URL (the SPA may have navigated internally)
         current_url = page.url
         logger.info("Quick Reserve page URL after load: %s", current_url)
+
+        # Dump page body text (first 3000 chars) for diagnostics
+        try:
+            body_text = await page.inner_text("body")
+            logger.info(
+                "Quick Reserve body text (first 3000 chars): %s",
+                body_text[:3000].replace("\n", " | "),
+            )
+        except Exception as e:
+            logger.warning("Could not read body text: %s", e)
+
+        # Log all network URLs captured so far
+        logger.info(
+            "Network URLs after Quick Reserve load (%d): %s",
+            len(self.all_network_urls),
+            json.dumps([u for u in self.all_network_urls if "activecommunities" in u], indent=2)[:3000],
+        )
 
         # Try to select McFetridge / Tennis from whatever UI is presented
         await self._try_select_facility(page)
@@ -450,10 +472,21 @@ class AvailabilityChecker:
 
             await self._save_diag(page, f"activity_search_{label}")
 
-            # Find activity links
+            # Log page body text for debugging
+            try:
+                body_text = await page.inner_text("body")
+                logger.info(
+                    "Activity search [%s] body text (first 2000 chars): %s",
+                    label, body_text[:2000].replace("\n", " | "),
+                )
+            except Exception:
+                pass
+
+            # Find activity links — try multiple selector patterns
             activity_links = await page.evaluate("""
                 () => {
                     const links = [];
+                    // Pattern 1: detail links
                     document.querySelectorAll(
                         'a[href*="/activity/search/detail/"]'
                     ).forEach(el => {
@@ -462,6 +495,17 @@ class AvailabilityChecker:
                             text: (el.textContent || '').trim().substring(0, 200),
                         });
                     });
+                    // Pattern 2: activity links (broader)
+                    if (links.length === 0) {
+                        document.querySelectorAll(
+                            'a[href*="/activity/"], a[href*="/Activity_Search/"]'
+                        ).forEach(el => {
+                            links.push({
+                                href: el.href,
+                                text: (el.textContent || '').trim().substring(0, 200),
+                            });
+                        });
+                    }
                     return links;
                 }
             """)

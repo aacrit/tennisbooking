@@ -206,14 +206,15 @@ async def _notify_opened_slots(opened: set[tuple]):
 
     instance_id = settings.green_api_instance_id
     api_token = settings.green_api_token
-    chat_id = settings.whatsapp_chat_id
+    chat_ids = settings.whatsapp_chat_ids
 
-    if instance_id and api_token and chat_id:
+    if instance_id and api_token and chat_ids:
         msg = format_slots_message(slots_to_notify)
-        success = send_whatsapp(instance_id, api_token, chat_id, msg)
-        await db.record_notification(
-            "whatsapp", chat_id, slots_to_notify, success,
-        )
+        for chat_id in chat_ids:
+            success = send_whatsapp(instance_id, api_token, chat_id, msg)
+            await db.record_notification(
+                "whatsapp", chat_id, slots_to_notify, success,
+            )
     else:
         logger.warning(
             "WhatsApp not configured (missing GREEN_API_INSTANCE_ID / "
@@ -339,12 +340,16 @@ async def lifespan(app):
     asyncio.create_task(_startup_scan())
 
     # Log WhatsApp configuration status
+    chat_ids = settings.whatsapp_chat_ids
     wa_configured = bool(
         settings.green_api_instance_id and
         settings.green_api_token and
-        settings.whatsapp_chat_id
+        chat_ids
     )
-    logger.info("WhatsApp notifications: %s", "CONFIGURED" if wa_configured else "NOT CONFIGURED")
+    logger.info(
+        "WhatsApp notifications: %s",
+        f"CONFIGURED ({len(chat_ids)} recipient{'s' if len(chat_ids) != 1 else ''})" if wa_configured else "NOT CONFIGURED",
+    )
 
     yield
 

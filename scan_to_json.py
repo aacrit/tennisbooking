@@ -166,8 +166,9 @@ async def main():
     # Send WhatsApp notification for newly opened slots
     instance_id = os.environ.get("GREEN_API_INSTANCE_ID", "")
     api_token = os.environ.get("GREEN_API_TOKEN", "")
-    chat_id = os.environ.get("WHATSAPP_CHAT_ID", "")
-    wa_configured = bool(instance_id and api_token and chat_id)
+    chat_ids_raw = os.environ.get("WHATSAPP_CHAT_ID", "")
+    chat_ids = [cid.strip() for cid in chat_ids_raw.split(",") if cid.strip()]
+    wa_configured = bool(instance_id and api_token and chat_ids)
 
     opened = changes.get("opened", [])
     # Only notify for prime-time slots (weekday 6PM+ or weekends)
@@ -179,8 +180,9 @@ async def main():
         if wa_configured:
             from notifications.whatsapp import send_whatsapp, format_slots_message
             msg = format_slots_message(prime_opened)
-            ok = send_whatsapp(instance_id, api_token, chat_id, msg)
-            logger.info("WhatsApp sent=%s for %d prime-time opened slots (of %d total)", ok, len(prime_opened), len(opened))
+            for chat_id in chat_ids:
+                ok = send_whatsapp(instance_id, api_token, chat_id, msg)
+                logger.info("WhatsApp sent=%s to %s for %d prime-time opened slots (of %d total)", ok, chat_id, len(prime_opened), len(opened))
         else:
             logger.warning("WhatsApp NOT configured — skipping notification for %d prime-time opened slots", len(prime_opened))
     elif opened:
@@ -212,9 +214,10 @@ def send_test_whatsapp():
 
     instance_id = os.environ.get("GREEN_API_INSTANCE_ID", "")
     api_token = os.environ.get("GREEN_API_TOKEN", "")
-    chat_id = os.environ.get("WHATSAPP_CHAT_ID", "")
+    chat_ids_raw = os.environ.get("WHATSAPP_CHAT_ID", "")
+    chat_ids = [cid.strip() for cid in chat_ids_raw.split(",") if cid.strip()]
 
-    if not all([instance_id, api_token, chat_id]):
+    if not all([instance_id, api_token, chat_ids]):
         logger.error(
             "Cannot send test: missing GREEN_API_INSTANCE_ID, GREEN_API_TOKEN, "
             "or WHATSAPP_CHAT_ID environment variables"
@@ -229,13 +232,14 @@ def send_test_whatsapp():
     ]
 
     msg = format_slots_message(mock_slots)
-    logger.info("Sending test WhatsApp message to %s...", chat_id)
-    ok = send_whatsapp(instance_id, api_token, chat_id, msg)
-    if ok:
-        logger.info("Test message sent successfully!")
-    else:
-        logger.error("Test message FAILED — check credentials and logs above")
-        sys.exit(1)
+    for chat_id in chat_ids:
+        logger.info("Sending test WhatsApp message to %s...", chat_id)
+        ok = send_whatsapp(instance_id, api_token, chat_id, msg)
+        if ok:
+            logger.info("Test message sent to %s successfully!", chat_id)
+        else:
+            logger.error("Test message to %s FAILED — check credentials and logs above", chat_id)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

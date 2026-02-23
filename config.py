@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     green_api_token: str = ""
     whatsapp_chat_id: str = ""
 
+    @property
+    def whatsapp_chat_ids(self) -> list[str]:
+        """Parse comma-separated chat IDs into a list."""
+        if not self.whatsapp_chat_id:
+            return []
+        return [cid.strip() for cid in self.whatsapp_chat_id.split(",") if cid.strip()]
+
     # API polling (lightweight HTTP checks between Playwright scans)
     api_poll_enabled: bool = True
     api_poll_peak_seconds: int = 15       # 6:55-7:10 AM burst interval

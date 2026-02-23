@@ -871,13 +871,24 @@ class AvailabilityChecker:
 
         await self._dump_dom_structure(page, "dom_quick_reserve_final")
 
+        dom_slot_count = len(slots) - total_api_slots
         logger.info(
             "QUICK RESERVE SUMMARY: grid_found=%s, captured_responses=%d, "
             "network_urls=%d, dom_slots=%d, api_slots=%d, total=%d, resources=%d",
             grid_found, len(self.captured_responses), len(self.all_network_urls),
-            len(slots) - total_api_slots, total_api_slots, len(slots),
+            dom_slot_count, total_api_slots, len(slots),
             len(resource_names),
         )
+
+        # Cross-validate DOM vs API slot counts to detect interpretation drift
+        if dom_slot_count > 0 and total_api_slots > 0:
+            ratio = total_api_slots / dom_slot_count
+            if ratio < 0.3 or ratio > 3.0:
+                logger.warning(
+                    "API/DOM slot count mismatch: api=%d dom=%d ratio=%.2f — "
+                    "status interpretation may need review",
+                    total_api_slots, dom_slot_count, ratio,
+                )
 
         return slots
 
@@ -2337,8 +2348,8 @@ class AvailabilityChecker:
                   "resourceName": "McFetridge Tennis Ct01",
                   "resourceID": 123,
                   "timeSlotDetails": [
-                    {"status": 0, "selected": false},  // 0=available
-                    {"status": 1, "selected": false},  // 1=unavailable
+                    {"status": 0, "selected": false},  // 0=unavailable/booked
+                    {"status": 1, "selected": false},  // non-zero=available
                     ...
                   ]
                 }, ...
@@ -2346,6 +2357,11 @@ class AvailabilityChecker:
             }
           }
         }
+
+        ActiveNet uses status 0 for unavailable/booked slots and non-zero
+        values (typically 1) for available slots. This was verified by
+        cross-referencing API status values against the DOM grid's visual
+        disabled/enabled states on the live booking website.
 
         Field names may use snake_case or camelCase depending on ActiveNet version.
         """
@@ -2397,6 +2413,25 @@ class AvailabilityChecker:
             sorted(resources[0].keys()),
         )
 
+        # Log status value distribution for diagnostics
+        status_dist: dict[int, int] = {}
+        for _res in resources:
+            _details = (
+                _res.get("timeSlotDetails")
+                or _res.get("time_slot_details")
+                or []
+            )
+            for _d in _details:
+                if isinstance(_d, dict):
+                    _s = _d.get("status")
+                    if _s is not None:
+                        status_dist[_s] = status_dist.get(_s, 0) + 1
+        logger.info(
+            "Availability grid status distribution: %s (total cells=%d)",
+            dict(sorted(status_dist.items())),
+            sum(status_dist.values()),
+        )
+
         for res in resources:
             # Resource name: try camelCase first, then snake_case
             res_name = str(
@@ -2431,16 +2466,16 @@ class AvailabilityChecker:
 
                 # Determine availability from detail
                 if isinstance(detail, dict):
-                    # ActiveNet uses status: 0=available, 1=unavailable
+                    # ActiveNet uses status: 0=unavailable/booked, non-zero=available
                     status = detail.get("status")
                     if status is not None:
-                        is_avail = (status == 0)
+                        is_avail = (status != 0)
                     else:
                         # Fallback to boolean fields
                         is_avail = detail.get("available",
                                     detail.get("isAvailable", False))
                 elif isinstance(detail, (int, float)):
-                    is_avail = (detail == 0)
+                    is_avail = (detail != 0)
                 elif isinstance(detail, bool):
                     is_avail = detail
                 else:
@@ -2469,6 +2504,14 @@ class AvailabilityChecker:
             "(total cells=%d)",
             len(slots), len(resources), len(resources) * len(time_slots),
         )
+
+        # Per-resource slot summary for diagnostics
+        resource_summary: dict[str, int] = {}
+        for slot in slots:
+            name = slot["court_name"]
+            resource_summary[name] = resource_summary.get(name, 0) + 1
+        if resource_summary:
+            logger.info("Availability grid per-resource: %s", resource_summary)
 
         return slots
 

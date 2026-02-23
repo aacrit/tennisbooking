@@ -403,7 +403,6 @@ class AvailabilityChecker:
 
         # Initialize date tracking — the grid loads with today's date
         self._current_grid_date = date.today()
-        self._date_picker_logged = False
 
         await self._save_diag(page, "after_facility_select")
 
@@ -417,11 +416,24 @@ class AvailabilityChecker:
             len(resource_names), resource_names,
         )
 
+        # Iterate through target dates
+        target_dates = self._get_target_dates()
+
+        # Process initial API responses (captured during facility selection)
+        # with the first target date. When date navigation works, each date
+        # change will trigger a new API response that gets its own date.
+        if self.captured_responses and target_dates:
+            initial_api_slots = self._parse_captured_responses(
+                current_date=target_dates[0],
+                responses=self.captured_responses,
+            )
+            if initial_api_slots:
+                slots.extend(initial_api_slots)
+                total_api_slots += len(initial_api_slots)
+
         # Track how many API responses we've already processed
         api_responses_processed = len(self.captured_responses)
 
-        # Iterate through target dates
-        target_dates = self._get_target_dates()
         for target_date in target_dates:
             logger.info("Checking date: %s", target_date.isoformat())
             date_changed = await self._try_select_date(page, target_date)
@@ -455,14 +467,6 @@ class AvailabilityChecker:
                         slot["court_name"] = matched
 
             slots.extend(page_slots)
-
-        # Parse any remaining API responses not yet processed
-        remaining = self.captured_responses[api_responses_processed:]
-        if remaining:
-            api_slots = self._parse_captured_responses(responses=remaining)
-            if api_slots:
-                slots.extend(api_slots)
-                total_api_slots += len(api_slots)
 
         await self._dump_dom_structure(page, "dom_quick_reserve_final")
 

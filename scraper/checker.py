@@ -274,9 +274,19 @@ class AvailabilityChecker:
         all_slots = []
 
         async with async_playwright() as p:
+            logger.info("Launching Chromium browser...")
             browser = await p.chromium.launch(
                 headless=not self.settings.debug_headed,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-extensions",
+                    "--disable-background-networking",
+                    "--single-process",
+                ],
             )
+            logger.info("Browser launched, creating context...")
             context = await browser.new_context(
                 viewport={"width": 1280, "height": 800},
                 user_agent=(
@@ -285,7 +295,9 @@ class AvailabilityChecker:
                     "Chrome/120.0.0.0 Safari/537.36"
                 ),
             )
+            logger.info("Context created, opening page...")
             page = await context.new_page()
+            logger.info("Page ready, starting scrape")
             page.on("request", self._on_request)
             page.on("response", self._on_response)
 

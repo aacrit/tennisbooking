@@ -8,6 +8,11 @@ class Settings(BaseSettings):
         "reservation?onlineSiteId=0&from_original_cui=true&locale=en-US"
     )
 
+    # ActiveNet authentication (required for real court availability)
+    # Anonymous users see courts as unavailable; logging in reveals real data.
+    activenet_username: str = ""
+    activenet_password: str = ""
+
     # Scanning schedule (CT timezone)
     peak_interval_minutes: int = 5      # 6:50 AM - 8:00 AM CT
     normal_interval_minutes: int = 45   # 8:00 AM - 11:59 PM CT

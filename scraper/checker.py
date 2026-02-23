@@ -663,6 +663,14 @@ class AvailabilityChecker:
             page.on("request", self._on_request)
             page.on("response", self._on_response)
 
+            # Log in for accurate court availability (anonymous users
+            # see courts as unavailable — only equipment is visible)
+            logged_in = await self._login(page)
+            logger.info(
+                "Login status: %s",
+                "authenticated" if logged_in else "anonymous (limited)",
+            )
+
             try:
                 # Strategy 1: Quick Reserve page (real booking path)
                 all_slots = await self._check_quick_reserve(page)
@@ -707,6 +715,191 @@ class AvailabilityChecker:
                 await browser.close()
 
         return all_slots
+
+    # ── Authentication ────────────────────────────────────────────────
+
+    async def _login(self, page: Page) -> bool:
+        """Log in to ActiveNet for accurate court availability.
+
+        Anonymous users see all court resources as status=1 (unavailable).
+        Only equipment (ball machines) shows real availability.  Logging in
+        reveals actual court availability data.
+        """
+        username = self.settings.activenet_username
+        password = self.settings.activenet_password
+        if not username or not password:
+            logger.warning(
+                "No ActiveNet credentials configured — court availability "
+                "will be limited (anonymous view hides real court status). "
+                "Set ACTIVENET_USERNAME and ACTIVENET_PASSWORD."
+            )
+            return False
+
+        logger.info("Logging in to ActiveNet as %s...", username)
+
+        # Navigate to the sign-in page
+        signin_url = (
+            "https://anc.apm.activecommunities.com/chicagoparkdistrict"
+            "/signin?onlineSiteId=0&from_original_cui=true&locale=en-US"
+        )
+        try:
+            await page.goto(signin_url, wait_until="networkidle", timeout=30000)
+        except Exception as e:
+            logger.warning("Failed to load sign-in page: %s", e)
+            return False
+
+        await asyncio.sleep(2)  # Wait for React to render the form
+
+        # Find and fill email/username input (try multiple selectors)
+        email_selectors = [
+            'input[data-qa-id="login-email"]',
+            'input[type="email"]',
+            'input[name="email"]',
+            'input[name="loginName"]',
+            'input[name="username"]',
+            'input[id="email"]',
+            'input[placeholder*="email" i]',
+            'input[placeholder*="Email" i]',
+            'input[aria-label*="email" i]',
+            '#loginName',
+        ]
+        email_input = None
+        for sel in email_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    email_input = el
+                    logger.info("Found email input: %s", sel)
+                    break
+            except Exception:
+                continue
+
+        if not email_input:
+            # Broader fallback: first visible text/email input in a form
+            try:
+                email_input = await page.query_selector(
+                    'form input[type="text"], form input[type="email"]'
+                )
+                if email_input:
+                    logger.info("Found email input via form fallback")
+            except Exception:
+                pass
+
+        if not email_input:
+            logger.warning("Could not find email input on sign-in page")
+            await self._save_diag(page, "login_no_email_input")
+            return False
+
+        # Find and fill password input
+        password_selectors = [
+            'input[data-qa-id="login-password"]',
+            'input[type="password"]',
+            'input[name="password"]',
+            '#password',
+        ]
+        password_input = None
+        for sel in password_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    password_input = el
+                    logger.info("Found password input: %s", sel)
+                    break
+            except Exception:
+                continue
+
+        if not password_input:
+            logger.warning("Could not find password input on sign-in page")
+            await self._save_diag(page, "login_no_password_input")
+            return False
+
+        # Fill credentials
+        await email_input.click()
+        await email_input.fill(username)
+        await password_input.click()
+        await password_input.fill(password)
+
+        # Find and click submit button
+        submit_selectors = [
+            'button[data-qa-id="login-submit"]',
+            'button[type="submit"]',
+            'button:has-text("Sign In")',
+            'button:has-text("Log In")',
+            'input[type="submit"]',
+            'a:has-text("Sign In")',
+        ]
+        clicked = False
+        for sel in submit_selectors:
+            try:
+                btn = await page.query_selector(sel)
+                if btn and await btn.is_visible():
+                    await btn.click()
+                    clicked = True
+                    logger.info("Clicked login submit: %s", sel)
+                    break
+            except Exception:
+                continue
+
+        if not clicked:
+            # Try pressing Enter as fallback
+            await page.keyboard.press("Enter")
+            logger.info("Pressed Enter to submit login form")
+
+        # Wait for login to process
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
+        await asyncio.sleep(3)
+
+        # Verify login succeeded
+        logged_in = await self._verify_login(page)
+        if logged_in:
+            logger.info("Login successful")
+        else:
+            logger.warning("Login may have failed — continuing anyway")
+            await self._save_diag(page, "login_verification_failed")
+
+        return logged_in
+
+    async def _verify_login(self, page: Page) -> bool:
+        """Check if login succeeded by looking for authenticated indicators."""
+        # Check 1: Look for "Sign Out" / "My Account" text (logged in)
+        try:
+            signout = await page.query_selector(
+                'a:has-text("Sign Out"), a:has-text("Log Out"), '
+                'a:has-text("My Account")'
+            )
+            if signout and await signout.is_visible():
+                return True
+        except Exception:
+            pass
+
+        # Check 2: Check that "Sign In" link is gone
+        try:
+            signin = await page.query_selector('a:has-text("Sign In")')
+            if signin and await signin.is_visible():
+                return False
+        except Exception:
+            pass
+
+        # Check 3: Check cookies for logged session
+        try:
+            cookies = await page.context.cookies()
+            for c in cookies:
+                if "LOGGED" in c["name"].upper() and c["value"]:
+                    logger.info("Found logged session cookie: %s", c["name"])
+                    return True
+        except Exception:
+            pass
+
+        # Check 4: Page URL — if redirected away from signin, likely success
+        url = page.url
+        if "signin" not in url.lower() and "login" not in url.lower():
+            logger.info("Redirected away from login page: %s", url)
+            return True
+
+        return False
 
     # ── Quick Reserve page ───────────────────────────────────────────
 

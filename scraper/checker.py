@@ -877,31 +877,14 @@ class AvailabilityChecker:
     async def _try_select_date(self, page: Page, target_date: date) -> bool:
         """Select a date in the ActiveNet Quick Reserve calendar popup.
 
-        ActiveNet uses an `an-date-picker` component. The proven strategy:
-        1. Click the date input to open the calendar dropdown
-        2. Click the target day cell in the dropdown
-        3. Wait for the SPA to fire a new availability API call
+        Strategy: Click input → wait for popup → use JS to mark the right
+        day cell → use Playwright's trusted click on the marked cell.
 
-        The input: aria-label="Date picker, current date"
-        The popup: .an-date-picker__popper
+        IMPORTANT: Must use Playwright click (not JS cell.click()) because
+        the React SPA only responds to trusted browser events.
         """
         date_iso = target_date.isoformat()
         date_input_sel = 'input[aria-label="Date picker, current date"]'
-
-        # First time only: log date picker diagnostics
-        if not hasattr(self, "_date_picker_logged"):
-            self._date_picker_logged = True
-            try:
-                dp_info = await page.evaluate("""
-                    () => {
-                        const el = document.querySelector('input[aria-label="Date picker, current date"]');
-                        if (!el) return null;
-                        return { value: el.value, visible: el.offsetParent !== null };
-                    }
-                """)
-                logger.info("Date picker input: %s", dp_info)
-            except Exception:
-                pass
 
         try:
             el = await page.query_selector(date_input_sel)
@@ -917,94 +900,104 @@ class AvailabilityChecker:
 
             # Click the input to open the calendar dropdown
             await el.click()
-            await asyncio.sleep(0.8)
 
-            # Use JavaScript to find and click the exact target day cell.
-            # The calendar may show days from adjacent months, so we need to
-            # be precise — match by exact text content and exclude greyed-out
-            # (previous/next month) cells.
-            clicked = await page.evaluate("""
+            # Wait for the popup to actually appear in the DOM
+            try:
+                await page.wait_for_selector(
+                    ".an-date-picker__popper", state="visible", timeout=3000,
+                )
+            except Exception:
+                logger.warning("Calendar popup did not appear after clicking input")
+                return False
+
+            await asyncio.sleep(0.3)
+
+            # Use JS to find the right day cell and mark it with a data attribute.
+            # We do NOT click it with JS — we need Playwright's trusted click.
+            mark_result = await page.evaluate("""
                 (dayNum) => {
+                    // Remove any previous markers
+                    document.querySelectorAll('[data-target-day]').forEach(
+                        el => el.removeAttribute('data-target-day')
+                    );
+
                     const popper = document.querySelector('.an-date-picker__popper');
                     if (!popper) return { found: false, reason: 'no popper' };
 
-                    // Find all day cells in the calendar grid
                     const cells = popper.querySelectorAll('td');
-                    const candidates = [];
+                    let allTexts = [];
 
                     for (const cell of cells) {
                         const text = (cell.textContent || '').trim();
+                        allTexts.push(text);
                         if (text !== String(dayNum)) continue;
 
-                        // Skip cells that belong to adjacent months
-                        // (ActiveNet typically uses 'prev-month' or 'next-month' classes,
-                        // or the cell may be disabled/greyed out)
+                        // Skip adjacent-month cells
                         const cls = (cell.className || '').toLowerCase();
                         if (cls.includes('prev-month') || cls.includes('next-month') ||
                             cls.includes('disabled') || cls.includes('other-month')) {
                             continue;
                         }
 
-                        candidates.push({
-                            text: text,
-                            className: cell.className || '',
-                            visible: cell.offsetParent !== null,
-                        });
-
-                        // Click the first matching, visible cell
                         if (cell.offsetParent !== null) {
-                            cell.click();
-                            return { found: true, clicked: true, className: cell.className };
+                            // Mark this cell so Playwright can find and click it
+                            cell.setAttribute('data-target-day', 'true');
+                            return {
+                                found: true,
+                                className: cell.className || '',
+                                tdCount: cells.length,
+                            };
                         }
                     }
 
                     return {
-                        found: candidates.length > 0,
-                        clicked: false,
-                        candidates: candidates.length,
-                        reason: 'no visible matching cell',
+                        found: false,
+                        tdCount: cells.length,
+                        allTexts: allTexts.slice(0, 42),
+                        reason: 'no matching cell for day ' + dayNum,
                     };
                 }
             """, target_date.day)
 
-            if clicked and clicked.get("clicked"):
-                logger.info(
-                    "Clicked calendar day %d (class=%s)",
-                    target_date.day, clicked.get("className", ""),
-                )
-                await asyncio.sleep(2)
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=10000)
-                except Exception:
-                    pass
-                self._current_grid_date = target_date
-                return True
+            if mark_result and mark_result.get("found"):
+                # Use Playwright's trusted click on the marked cell
+                marked = await page.query_selector("td[data-target-day='true']")
+                if marked:
+                    await marked.click()
+                    logger.info(
+                        "Clicked calendar day %d via Playwright (class=%s)",
+                        target_date.day, mark_result.get("className", ""),
+                    )
+                    await asyncio.sleep(2)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                    self._current_grid_date = target_date
+                    return True
 
             logger.warning(
-                "Calendar popup click result for day %d: %s",
-                target_date.day, clicked,
+                "Calendar popup: could not find day %d: %s",
+                target_date.day, mark_result,
             )
 
-            # Fallback: Playwright selector (less precise but handles edge cases)
-            day_selectors = [
-                f".an-date-picker__popper [data-date='{date_iso}']",
-                f".an-date-picker__popper td[data-day='{target_date.day}']",
-            ]
-            for sel in day_selectors:
-                try:
-                    day_el = await page.query_selector(sel)
-                    if day_el and await day_el.is_visible():
-                        await day_el.click()
-                        logger.info("Clicked calendar day via fallback: %s", sel)
-                        await asyncio.sleep(2)
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=10000)
-                        except Exception:
-                            pass
-                        self._current_grid_date = target_date
-                        return True
-                except Exception:
-                    continue
+            # Fallback: use Playwright's :has-text selector directly
+            # (less precise for single-digit days but works as last resort)
+            fallback_sel = f".an-date-picker__popper td:has-text('{target_date.day}')"
+            try:
+                day_el = await page.query_selector(fallback_sel)
+                if day_el and await day_el.is_visible():
+                    await day_el.click()
+                    logger.info("Clicked calendar day %d via fallback selector", target_date.day)
+                    await asyncio.sleep(2)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                    self._current_grid_date = target_date
+                    return True
+            except Exception:
+                pass
 
             # Close popup if nothing was clicked
             await page.keyboard.press("Escape")

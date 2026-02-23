@@ -580,3 +580,66 @@ class TestEndToEndNoEmptyCourts:
             for slot in day.get("slots", []):
                 assert slot["court_name"] != "", \
                     f"Found empty court_name in calendar output for {day['date']}"
+
+
+# ===========================================================================
+# Tests 24-29: Reservation page refactor (groupId=2, single strategy)
+# ===========================================================================
+
+class TestReservationPageStrategy:
+    """Verify the scraper uses the quick reservation page at groupId=2."""
+
+    def test_booking_url_uses_group_id_2(self):
+        """BOOKING_URL constant must use groupId=2."""
+        from scraper.checker import BOOKING_URL
+        assert "groupId=2" in BOOKING_URL
+        assert "groupId=1" not in BOOKING_URL
+
+    def test_config_booking_url_uses_group_id_2(self):
+        """config.py default booking_url must use groupId=2."""
+        s = Settings()
+        assert "groupId=2" in s.booking_url
+
+    def test_whatsapp_booking_url_uses_group_id_2(self):
+        """WhatsApp message footer URL must use groupId=2."""
+        from notifications.whatsapp import BOOKING_URL as WA_URL
+        assert "groupId=2" in WA_URL
+        assert "groupId=1" not in WA_URL
+
+    def test_activity_search_removed(self):
+        """_check_activity_search method should no longer exist."""
+        checker = AvailabilityChecker(Settings())
+        assert not hasattr(checker, '_check_activity_search'), \
+            "_check_activity_search should be removed"
+
+    def test_legacy_portal_removed(self):
+        """_check_legacy_portal method should no longer exist."""
+        checker = AvailabilityChecker(Settings())
+        assert not hasattr(checker, '_check_legacy_portal'), \
+            "_check_legacy_portal should be removed"
+
+    def test_resource_extraction_exists(self):
+        """_extract_resource_names method should exist on the checker."""
+        checker = AvailabilityChecker(Settings())
+        assert hasattr(checker, '_extract_resource_names')
+
+    def test_match_slot_to_resource(self):
+        """_match_slot_to_resource should match slot context to known resources."""
+        checker = AvailabilityChecker(Settings())
+        resources = ["McFetridge Tennis Ct01", "McFetridge Tennis Ct02", "Pickleball Ct1"]
+
+        # Slot with resource in parentText
+        slot = {
+            "court_name": "",
+            "raw": {"parentText": "McFetridge Tennis Ct01 Schedule"},
+        }
+        result = checker._match_slot_to_resource(slot, resources)
+        assert result == "McFetridge Tennis Ct01"
+
+        # Slot with no match
+        slot2 = {
+            "court_name": "",
+            "raw": {"parentText": "Something else entirely"},
+        }
+        result2 = checker._match_slot_to_resource(slot2, resources)
+        assert result2 == ""

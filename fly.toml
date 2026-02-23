@@ -21,7 +21,7 @@ primary_region = 'ord'
   min_machines_running = 1
 
 [[vm]]
-  memory = '512mb'
-  cpu_kind = 'shared'
+  memory = "1024mb"   # Chromium needs ~300-400MB + Python/FastAPI overhead
+  cpu_kind = "shared"
   cpus = 1
   memory_mb = 512

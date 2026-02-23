@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     # ActiveNet booking portal
     booking_url: str = (
         "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
-        "reservation/landing/quick?groupId=1&locale=en-US"
+        "reservation/landing/quick?groupId=2&locale=en-US"
     )
 
     # Scanning schedule (CT timezone)

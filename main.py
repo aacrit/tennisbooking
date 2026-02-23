@@ -62,7 +62,10 @@ async def run_full_scan() -> int:
 
         try:
             checker = AvailabilityChecker(settings)
-            raw_slots = await checker.check_availability()
+            # Timeout after 3 minutes to prevent Playwright hangs
+            raw_slots = await asyncio.wait_for(
+                checker.check_availability(), timeout=180
+            )
             filtered = filter_slots(raw_slots, settings)
             duration = _time.time() - start
 
@@ -323,7 +326,14 @@ async def lifespan(app):
         logger.info("Burst poll loop started (6:55-7:10 AM CT, every %ds)", settings.api_poll_peak_seconds)
 
     # Run an initial full scan on startup (also discovers API endpoints)
-    asyncio.create_task(run_full_scan())
+    async def _startup_scan():
+        try:
+            logger.info("Starting initial scan...")
+            await run_full_scan()
+            logger.info("Initial scan completed")
+        except Exception as e:
+            logger.exception("STARTUP SCAN CRASHED: %s", e)
+    asyncio.create_task(_startup_scan())
 
     # Log WhatsApp configuration status
     wa_configured = bool(

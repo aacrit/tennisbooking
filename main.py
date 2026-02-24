@@ -186,7 +186,7 @@ async def run_api_poll() -> int:
 async def _notify_opened_slots(opened: set[tuple]):
     """Send WhatsApp notification for newly opened slots with cooldown."""
     now = _time.time()
-    now_ct = datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CT")
+    now_ct = datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CST")
 
     # Filter out recently notified slots (cooldown)
     slots_to_notify = []

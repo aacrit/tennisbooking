@@ -4,6 +4,7 @@ FastAPI web dashboard for the tennis court monitor.
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import pytz
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,11 +14,30 @@ import db
 from config import Settings
 
 _settings = Settings()
+_CT = pytz.timezone("America/Chicago")
 
 WEB_DIR = Path(__file__).parent
 app = FastAPI(title="Tennis Court Monitor")
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
+
+
+def _format_utc_to_cst(utc_str: str) -> str:
+    """Convert SQLite UTC timestamp like '2026-02-22 22:19:33' to 'Feb 22, 4:19 PM'."""
+    if not utc_str:
+        return ""
+    try:
+        utc_dt = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S")
+        utc_dt = pytz.utc.localize(utc_dt)
+        cst_dt = utc_dt.astimezone(_CT)
+        hour = cst_dt.strftime("%I:%M %p").lstrip("0")
+        day = cst_dt.strftime("%b ") + str(cst_dt.day)
+        return f"{day}, {hour}"
+    except (ValueError, AttributeError):
+        return utc_str
+
+
+templates.env.filters["cst"] = _format_utc_to_cst
 
 # Will be set by main.py
 _run_check_fn = None
@@ -120,8 +140,10 @@ async def api_status():
             for day in cal
         ]
 
+    raw_time = last["scan_time"] if last else None
     return {
-        "last_scan_time": last["scan_time"] if last else None,
+        "last_scan_time": _format_utc_to_cst(raw_time) if raw_time else None,
+        "last_scan_time_utc": raw_time,
         "last_scan_success": bool(last["success"]) if last else None,
         "slots_found": last["slots_found"] if last else 0,
         "calendar": _calendar_json(calendar),

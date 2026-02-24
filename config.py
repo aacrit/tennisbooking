@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     normal_interval_minutes: int = 45   # 8:00 AM - 11:59 PM CT
     peak_start_hour: int = 6            # CT
     peak_end_hour: int = 8              # CT
-    quiet_start_hour: int = 0           # No scans midnight-6AM
+    quiet_start_hour: int = 0           # Overnight scans midnight-6AM (hourly)
     quiet_end_hour: int = 6
 
     # WhatsApp notifications via Green API

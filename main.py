@@ -255,22 +255,32 @@ def setup_scheduler() -> AsyncIOScheduler:
 
     # === PLAYWRIGHT FULL SCANS ===
 
-    # Peak: every 15 minutes from 6 AM to 8 AM CT
+    # Peak: every 5 minutes from 6 AM to 8 AM CT
     scheduler.add_job(
         run_full_scan,
-        CronTrigger(hour="6-7", minute="*/15", timezone=CT),
+        CronTrigger(hour="6-7", minute="*/5", timezone=CT),
         id="peak_full_scan",
-        name="Peak full scan (6-8 AM CT)",
+        name="Peak full scan (every 5 min, 6-8 AM CT)",
         replace_existing=True,
         misfire_grace_time=120,
     )
 
-    # Normal: every 30 minutes from 8 AM to midnight CT
+    # Normal: every 10 minutes from 8 AM to midnight CT
     scheduler.add_job(
         run_full_scan,
-        CronTrigger(hour="8-23", minute="0,30", timezone=CT),
+        CronTrigger(hour="8-23", minute="*/10", timezone=CT),
         id="normal_full_scan",
-        name="Normal full scan (8 AM - midnight CT)",
+        name="Normal full scan (every 10 min, 8 AM - midnight CT)",
+        replace_existing=True,
+        misfire_grace_time=120,
+    )
+
+    # Overnight: every hour from midnight to 6 AM CT
+    scheduler.add_job(
+        run_full_scan,
+        CronTrigger(hour="0-5", minute="0", timezone=CT),
+        id="overnight_full_scan",
+        name="Overnight full scan (every 1 hr, midnight-6 AM CT)",
         replace_existing=True,
         misfire_grace_time=120,
     )

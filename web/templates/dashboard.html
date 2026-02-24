@@ -91,57 +91,6 @@
 </div>
 
 
-<!-- Activity Feed -->
-<div class="feed">
-
-    <!-- Recent Scans -->
-    <details class="feed-section" open>
-        <summary class="feed-heading">
-            <span>Recent Scans</span>
-            <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="6 9 12 15 18 9"></polyline>
-            </svg>
-        </summary>
-        <div class="feed-list">
-            {% for scan in recent_scans %}
-            <div class="feed-row">
-                <span class="feed-dot {{ 'feed-dot-ok' if scan.success else 'feed-dot-err' }}"></span>
-                <span class="feed-time">{{ scan.scan_time }}</span>
-                <span class="feed-meta">{{ scan.slots_found }} slot{{ 's' if scan.slots_found != 1 }}</span>
-                <span class="feed-meta">{{ "%.1f"|format(scan.duration_seconds or 0) }}s</span>
-            </div>
-            {% endfor %}
-            {% if not recent_scans %}
-            <div class="feed-empty">No scans yet</div>
-            {% endif %}
-        </div>
-    </details>
-
-    {# [GITHUB-PAGES] Notifications feed disabled for static deployment
-    <details class="feed-section">
-        <summary class="feed-heading">
-            <span>Notifications</span>
-            <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="6 9 12 15 18 9"></polyline>
-            </svg>
-        </summary>
-        <div class="feed-list">
-            {% for notif in notifications %}
-            <div class="feed-row">
-                <span class="feed-dot {{ 'feed-dot-ok' if notif.success else 'feed-dot-err' }}"></span>
-                <span class="feed-time">{{ notif.sent_time }}</span>
-                <span class="feed-meta">{{ notif.slot_count }} slot{{ 's' if notif.slot_count != 1 }}</span>
-            </div>
-            {% endfor %}
-            {% if not notifications %}
-            <div class="feed-empty">No notifications yet</div>
-            {% endif %}
-        </div>
-    </details>
-    #}
-
-</div>
-
 <!-- Scan Log Table -->
 <div class="scan-log">
     <details class="feed-section" open>
@@ -156,35 +105,17 @@
                 <thead>
                     <tr>
                         <th>Time</th>
-                        <th>Status</th>
-                        <th>Method</th>
                         <th class="num">Slots</th>
                         <th class="num">Opened</th>
                         <th class="num">Closed</th>
-                        <th class="num">Notified</th>
+                        <th class="num">Notified (&gt;6PM Open)</th>
                         <th class="num">Duration</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for scan in scan_log %}
                     <tr class="{{ 'scan-row-err' if not scan.success }}">
-                        <td class="scan-time-col">{{ scan.scan_time }}</td>
-                        <td>
-                            {% if scan.success %}
-                                <span class="scan-badge scan-badge-ok">OK</span>
-                            {% else %}
-                                <span class="scan-badge scan-badge-err" title="{{ scan.error_message or '' }}">FAIL</span>
-                            {% endif %}
-                        </td>
-                        <td>
-                            {% if scan.scan_method == 'api_poll' %}
-                                <span class="scan-badge scan-badge-api">API</span>
-                            {% elif scan.scan_method %}
-                                <span class="scan-badge scan-badge-pw">PW</span>
-                            {% else %}
-                                <span class="scan-method-dash">&mdash;</span>
-                            {% endif %}
-                        </td>
+                        <td class="scan-time-col {{ 'scan-time-ok' if scan.success else 'scan-time-err' }}"{% if not scan.success and scan.error_message %} title="{{ scan.error_message }}"{% endif %}>{{ scan.scan_time }}</td>
                         <td class="num">{{ scan.slots_found }}</td>
                         <td class="num">
                             {% if scan.slots_opened > 0 %}
@@ -203,6 +134,9 @@
                         <td class="num">
                             {% if scan.notifications_sent > 0 %}
                                 <span class="scan-badge scan-badge-notif">{{ scan.notifications_sent }}</span>
+                                {% if scan.opened_courts %}
+                                    <span class="scan-notif-courts">{{ scan.opened_courts | replace("McFetridge Tennis ", "") | replace("Tennis ", "") }}</span>
+                                {% endif %}
                             {% else %}
                                 <span class="scan-delta-zero">&mdash;</span>
                             {% endif %}
@@ -212,7 +146,7 @@
                     {% endfor %}
                     {% if not scan_log %}
                     <tr>
-                        <td colspan="8" class="scan-log-empty">No scans recorded yet</td>
+                        <td colspan="6" class="scan-log-empty">No scans recorded yet</td>
                     </tr>
                     {% endif %}
                 </tbody>

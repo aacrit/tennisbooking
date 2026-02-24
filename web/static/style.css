@@ -349,6 +349,8 @@ details[open] > .feed-heading .chevron { transform: rotate(180deg); }
 .scan-log-table tbody tr:hover { background: var(--surface-hover); }
 .scan-row-err { background: var(--red-bg); }
 .scan-time-col { color: var(--text-2); }
+.scan-time-ok { color: var(--green); }
+.scan-time-err { color: var(--red); cursor: help; }
 
 .scan-badge {
     display: inline-flex; align-items: center; justify-content: center;
@@ -360,6 +362,7 @@ details[open] > .feed-heading .chevron { transform: rotate(180deg); }
 .scan-badge-pw { color: var(--text-2); background: var(--surface-hover); border: 1px solid var(--border); }
 .scan-badge-api { color: var(--blue); background: var(--blue-bg); border: 1px solid var(--blue-border); }
 .scan-badge-notif { color: var(--green); background: var(--green-bg); min-width: 18px; }
+.scan-notif-courts { display: inline; font-size: 10px; color: var(--text-2); margin-left: 4px; white-space: normal; }
 
 .scan-delta { font-weight: 600; }
 .scan-delta-up { color: var(--green); }
@@ -440,7 +443,7 @@ details[open] > .other-heading .chevron { transform: rotate(180deg); }
     .summary-count { font-size: 36px; }
     .summary { padding: 20px 0 16px; }
 
-    .scan-log-table { min-width: 580px; }
+    .scan-log-table { min-width: 480px; }
 }
 
 /* Tiny screens */

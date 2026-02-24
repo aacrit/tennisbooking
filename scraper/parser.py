@@ -119,12 +119,12 @@ def _filter_slots_base(raw_slots: list[dict], settings: Settings,
             logger.debug("Skipping slot with unparseable time: %s", slot.get("time"))
             continue
 
-        # Apply day-of-week filter
+        # Day-of-week classification
         day_of_week = slot_date.weekday()  # 0=Monday, 6=Sunday
         is_weekend = day_of_week >= 5
 
-        if not is_weekend and slot_time.hour < settings.weekday_earliest_hour:
-            continue
+        # Prime time: weekends (all hours) or weekday evenings (>= earliest hour)
+        is_prime_time = is_weekend or slot_time.hour >= settings.weekday_earliest_hour
 
         # Court name filter (caller decides tennis vs non-tennis)
         court_name = slot.get("court_name", "").strip()
@@ -144,6 +144,7 @@ def _filter_slots_base(raw_slots: list[dict], settings: Settings,
             "court_name": court_name,
             "day_of_week": slot_date.strftime("%A"),
             "is_weekend": is_weekend,
+            "is_prime_time": is_prime_time,
             "duration_minutes": slot.get("duration_minutes", 60),
         })
 
@@ -161,6 +162,47 @@ def filter_slots(raw_slots: list[dict], settings: Settings) -> list[dict]:
     """
     def _tennis_court(name: str) -> bool:
         return bool(name and ALLOWED_COURTS_RE.search(name))
+
+    # Diagnostic: count raw tennis slots before time/date filtering
+    tennis_raw = sum(1 for s in raw_slots if _tennis_court(s.get("court_name", "")))
+    if tennis_raw == 0 and raw_slots:
+        # Log sample court_names to understand what's available
+        court_names = sorted(set(s.get("court_name", "") for s in raw_slots if s.get("court_name")))
+        logger.info(
+            "No tennis courts in %d raw slots. Court names present: %s",
+            len(raw_slots), court_names[:20],
+        )
+        # Log source distribution to understand where slots came from
+        sources: dict[str, int] = {}
+        for s in raw_slots:
+            raw_data = s.get("raw")
+            src = (
+                raw_data.get("source", "unknown")
+                if isinstance(raw_data, dict)
+                else "unknown"
+            )
+            sources[src] = sources.get(src, 0) + 1
+        logger.info("Raw slot sources: %s", sources)
+    elif tennis_raw > 0:
+        # Count how many pass date/time filters
+        today = date.today()
+        tennis_future = 0
+        tennis_time_ok = 0
+        for s in raw_slots:
+            if not _tennis_court(s.get("court_name", "")):
+                continue
+            sd = parse_date_string(s.get("date", ""))
+            st = parse_time_string(s.get("time", ""))
+            if sd and sd > today and (sd - today).days <= settings.days_ahead:
+                tennis_future += 1
+                if st:
+                    is_weekend = sd.weekday() >= 5
+                    if is_weekend or st.hour >= settings.weekday_earliest_hour:
+                        tennis_time_ok += 1
+        logger.info(
+            "Tennis slot pipeline: raw=%d → future=%d → time_ok=%d",
+            tennis_raw, tennis_future, tennis_time_ok,
+        )
 
     result = _filter_slots_base(raw_slots, settings, _tennis_court)
     logger.info("Filtered %d tennis slots from %d raw entries", len(result), len(raw_slots))

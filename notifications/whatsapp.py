@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 BOOKING_URL = (
     "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
-    "reservation/landing/quick?groupId=2&locale=en-US"
+    "reservation?onlineSiteId=0&from_original_cui=true&locale=en-US"
 )
 
 

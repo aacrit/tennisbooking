@@ -32,10 +32,50 @@ AVAILABILITY_API_PATTERNS = [
     "/enrollment",
 ]
 
-# Quick reservation URL — McFetridge facility reservation page (groupId=2)
-BOOKING_URL = (
+# Facility reservation URLs — tried in order until the Quick Reserve grid loads.
+# mcfetridgesportscenter.com "Book Court Time" links to
+# apm.activecommunities.com/chicagoparkdistrict/Reserve_Options which
+# redirects here.  Note: /reservation/quick returns 404 as of Feb 2026.
+QUICK_RESERVE_URLS = [
+    # Primary: the current reservation page
+    (
+        "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
+        "reservation?onlineSiteId=0&from_original_cui=true&locale=en-US"
+    ),
+    # Quick Reserve landing (pattern from other ActiveNet sites)
+    (
+        "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
+        "reservation/landing/quick?locale=en-US"
+    ),
+    # Reservation landing
+    (
+        "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
+        "reservation/landing?locale=en-US"
+    ),
+    # Reserve Options page
+    (
+        "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
+        "Reserve_Options?onlineSiteId=0&from_original_cui=true"
+    ),
+]
+
+# Keep a single default for backward compatibility
+QUICK_RESERVE_URL = QUICK_RESERVE_URLS[0]
+
+# Activity search — fallback; searches for tennis court time activities
+ACTIVITY_SEARCH_URL = (
     "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
-    "reservation/landing/quick?groupId=2&locale=en-US"
+    "activity/search?onlineSiteId=0&locale=en-US"
+    "&activity_select_param=2&activity_keyword=tennis+court+time+mcfetridge"
+    "&viewMode=list"
+)
+
+# Broader activity search — second fallback with just McFetridge keyword
+ACTIVITY_SEARCH_BROAD_URL = (
+    "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
+    "activity/search?onlineSiteId=0&locale=en-US"
+    "&activity_select_param=2&activity_keyword=mcfetridge"
+    "&viewMode=list"
 )
 
 # Facility name regex — only matches known McFetridge facility patterns.
@@ -206,6 +246,335 @@ class AvailabilityChecker:
         except Exception as e:
             logger.warning("Failed to save diagnostic %s: %s", filename, e)
 
+    # ── Reservation page diagnostics ────────────────────────────────
+
+    async def _dump_reservation_page_state(self, page: Page, label: str):
+        """Capture detailed SPA state for the reservation page."""
+        if not self._diag_dir:
+            return
+        try:
+            state = await page.evaluate("""
+                () => {
+                    const result = {
+                        url: window.location.href,
+                        hash: window.location.hash,
+                        title: document.title,
+                        reduxKeys: null,
+                        quickReserveConfig: null,
+                        reservationLinks: [],
+                        navItems: [],
+                        selectElements: [],
+                        comboBoxes: [],
+                        bodyTextSample: (document.body?.innerText || '').substring(0, 8000),
+                    };
+
+                    // Try to access Redux store
+                    const stateObj = window.__reduxInitialState || window.__REDUX_STATE__;
+                    if (stateObj) {
+                        result.reduxKeys = Object.keys(stateObj);
+                        const json = JSON.stringify(stateObj);
+                        const configMatches = json.match(
+                            /"(enableOnline[^"]*|quick_?reserve[^"]*|disableonline[^"]*|facilit[^"]{0,30})"\s*:\s*[^,}]{1,50}/gi
+                        );
+                        result.quickReserveConfig = configMatches;
+                    }
+
+                    // Find all links related to reservation/facility
+                    document.querySelectorAll('a[href]').forEach(el => {
+                        const href = el.href || '';
+                        const text = (el.textContent || '').trim();
+                        if (/reserv|facilit|quick|booking|court|tennis/i.test(href + text)) {
+                            result.reservationLinks.push({
+                                href, text: text.substring(0, 100),
+                                class: el.className || '',
+                                visible: el.offsetParent !== null,
+                            });
+                        }
+                    });
+
+                    // Find navigation items
+                    document.querySelectorAll(
+                        'nav a, [role="navigation"] a, [class*="nav"] a, [class*="menu"] a'
+                    ).forEach(el => {
+                        result.navItems.push({
+                            href: el.href || '',
+                            text: (el.textContent || '').trim().substring(0, 80),
+                            visible: el.offsetParent !== null,
+                        });
+                    });
+
+                    // Find select elements and custom combo-boxes
+                    document.querySelectorAll('select').forEach(el => {
+                        const options = Array.from(el.options || []).map(o => o.text.substring(0, 80));
+                        result.selectElements.push({
+                            id: el.id || '', name: el.name || '',
+                            class: el.className || '',
+                            optionCount: options.length,
+                            options: options.slice(0, 20),
+                            visible: el.offsetParent !== null,
+                        });
+                    });
+
+                    document.querySelectorAll(
+                        '[role="combobox"], [role="listbox"], '
+                        + '[class*="an-dropdown"], [class*="an-select"], '
+                        + '[class*="combo-box"], [class*="combobox"]'
+                    ).forEach(el => {
+                        result.comboBoxes.push({
+                            tag: el.tagName, role: el.getAttribute('role') || '',
+                            class: el.className || '',
+                            text: (el.textContent || '').trim().substring(0, 200),
+                            visible: el.offsetParent !== null,
+                        });
+                    });
+
+                    return result;
+                }
+            """)
+            self._save_diag_json(f"reservation_state_{label}.json", state)
+            logger.info(
+                "Reservation state [%s]: url=%s, navItems=%d, links=%d, selects=%d, combos=%d",
+                label, state.get("url", "?"),
+                len(state.get("navItems", [])),
+                len(state.get("reservationLinks", [])),
+                len(state.get("selectElements", [])),
+                len(state.get("comboBoxes", [])),
+            )
+        except Exception as e:
+            logger.warning("Reservation state dump failed for %s: %s", label, e)
+
+    # ── Quick Reserve grid detection ─────────────────────────────────
+
+    async def _detect_quick_reserve_grid(self, page: Page) -> bool:
+        """Check if the Quick Reserve availability grid is visible on the page."""
+        indicators = await page.evaluate("""
+            () => {
+                const result = {
+                    hasResourceGrid: !!document.querySelector(
+                        '.an-resource-grid, [data-qa-id="resource-grid-view-container"]'
+                    ),
+                    hasGridTable: !!document.querySelector(
+                        '.an-resource-grid table, [class*="resource-grid"] table'
+                    ),
+                    hasDatePicker: !!document.querySelector(
+                        'input[aria-label*="Date" i], [class*="date-picker"] input, '
+                        + 'input[type="date"], [class*="an-date-picker"]'
+                    ),
+                    resourceHeaderCount: document.querySelectorAll(
+                        '.resource-header-cell__title, [class*="resource-header"], '
+                        + '[class*="resource-name"]'
+                    ).length,
+                    timeHeaderCount: document.querySelectorAll(
+                        'thead th .header-cell, thead th[class*="time"]'
+                    ).length,
+                    gridCellCount: document.querySelectorAll(
+                        'td.td-grid-cell, td[class*="grid-cell"]'
+                    ).length,
+                    tableCount: document.querySelectorAll('table').length,
+                    hasFacilitySelect: !!document.querySelector(
+                        'select[class*="facility" i], select[class*="center" i], '
+                        + '[class*="facility-select"], [class*="center-select"]'
+                    ),
+                    bodyHasTimeSlots: /\\d{1,2}:\\d{2}\\s*(AM|PM)/i.test(
+                        document.body?.innerText || ''
+                    ),
+                    bodyHasCourt: /tennis|court\\s*\\d|pickleball/i.test(
+                        document.body?.innerText || ''
+                    ),
+                    url: window.location.href,
+                };
+                return result;
+            }
+        """)
+
+        self._save_diag_json("grid_detection.json", indicators)
+
+        if indicators.get("hasResourceGrid") or indicators.get("hasGridTable"):
+            logger.info("Quick Reserve grid DETECTED (resource grid): %s", indicators)
+            return True
+        if indicators.get("gridCellCount", 0) > 5:
+            logger.info(
+                "Quick Reserve grid DETECTED (%d cells): %s",
+                indicators["gridCellCount"], indicators,
+            )
+            return True
+        if (indicators.get("resourceHeaderCount", 0) > 0
+                and indicators.get("timeHeaderCount", 0) > 0):
+            logger.info("Quick Reserve grid DETECTED (resource+time headers): %s", indicators)
+            return True
+
+        logger.info("Quick Reserve grid NOT detected: %s", indicators)
+        return False
+
+    # ── SPA internal navigation ──────────────────────────────────────
+
+    async def _navigate_to_quick_reserve_via_spa(self, page: Page) -> bool:
+        """Navigate within the React SPA to reach the Quick Reserve view."""
+
+        # Strategy: Click SPA navigation links
+        nav_targets = [
+            "a:has-text('Facilities')",
+            "a:has-text('Reserve')",
+            "a:has-text('Quick Reserve')",
+            "a:has-text('Make a Reservation')",
+            "a[href*='Reserve_Options']",
+            "a[href*='reservation']",
+            "a[href*='reserve']",
+            "[class*='nav'] a:has-text('Facilities')",
+            "[class*='nav'] a:has-text('Reserve')",
+            "[role='navigation'] a:has-text('Facilities')",
+            "[class*='menu'] a:has-text('Facilities')",
+            "[class*='menu'] a:has-text('Reserve')",
+        ]
+
+        for sel in nav_targets:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    logger.info("SPA nav: clicking %s", sel)
+                    await el.click()
+                    await asyncio.sleep(3)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass
+
+                    await self._save_diag(page, f"spa_nav_{sel[:30]}")
+
+                    if await self._detect_quick_reserve_grid(page):
+                        return True
+
+                    # Check if availability API was captured
+                    if self._has_availability_api():
+                        logger.info("SPA nav: availability API captured after clicking %s", sel)
+                        return True
+
+                    # Second-level navigation: after clicking a top-level link,
+                    # look for sub-options
+                    sub_targets = [
+                        "a:has-text('Quick Reserve')",
+                        "a:has-text('Court Time')",
+                        "a:has-text('Tennis')",
+                        "button:has-text('Quick Reserve')",
+                        "[class*='card']:has-text('Quick Reserve')",
+                        "[class*='card']:has-text('Reserve')",
+                        "[class*='option']:has-text('Quick Reserve')",
+                        "[class*='tile']:has-text('Reserve')",
+                    ]
+                    for sub_sel in sub_targets:
+                        try:
+                            sub_el = await page.query_selector(sub_sel)
+                            if sub_el and await sub_el.is_visible():
+                                logger.info("SPA nav: clicking sub-target %s", sub_sel)
+                                await sub_el.click()
+                                await asyncio.sleep(3)
+                                try:
+                                    await page.wait_for_load_state(
+                                        "networkidle", timeout=15000,
+                                    )
+                                except Exception:
+                                    pass
+                                if await self._detect_quick_reserve_grid(page):
+                                    return True
+                                if self._has_availability_api():
+                                    return True
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+        logger.warning("SPA navigation: could not reach Quick Reserve grid")
+        return False
+
+    def _has_availability_api(self) -> bool:
+        """Check if any captured response is a quickreservation/availability API."""
+        return any(
+            "quickreservation" in r.get("url", "").lower()
+            and "availability" in r.get("url", "").lower()
+            for r in self.captured_responses
+        )
+
+    # ── Direct API fallback ──────────────────────────────────────────
+
+    async def _try_direct_availability_api(
+        self, page: Page, target_date: date,
+    ) -> list[dict]:
+        """Call the availability API directly via page.evaluate(fetch()).
+
+        Runs in the browser context with session cookies and CSRF tokens.
+        This is a fallback when SPA navigation fails to trigger the API.
+        """
+        base = "https://anc.apm.activecommunities.com/chicagoparkdistrict"
+        date_str = target_date.isoformat()
+        api_patterns = [
+            f"{base}/rest/reservation/quickreservation/availability"
+            f"?date={date_str}&locale=en-US",
+            f"{base}/rest/reservation/quickreservation/availability"
+            f"?reservationDate={date_str}&locale=en-US",
+            f"{base}/rest/reservation/availability"
+            f"?date={date_str}&locale=en-US",
+            f"{base}/rest/facility/availability"
+            f"?date={date_str}&locale=en-US",
+        ]
+
+        for api_url in api_patterns:
+            try:
+                result = await page.evaluate("""
+                    async (url) => {
+                        try {
+                            const resp = await fetch(url, {
+                                credentials: 'include',
+                                headers: {
+                                    'Accept': 'application/json',
+                                    'X-Requested-With': 'XMLHttpRequest',
+                                },
+                            });
+                            if (!resp.ok) return { status: resp.status, ok: false };
+                            const data = await resp.json();
+                            return { status: resp.status, ok: true, data: data };
+                        } catch (e) {
+                            return { ok: false, error: e.message };
+                        }
+                    }
+                """, api_url)
+
+                if not result or not result.get("ok"):
+                    logger.debug(
+                        "Direct API %s: status=%s error=%s",
+                        api_url.split("?")[0].split("/")[-1],
+                        result.get("status", "?"),
+                        result.get("error", ""),
+                    )
+                    continue
+
+                data = result.get("data")
+                if not data:
+                    continue
+
+                logger.info(
+                    "Direct API succeeded: %s (status=%s, type=%s)",
+                    api_url[:120], result.get("status"), type(data).__name__,
+                )
+                self._save_diag_json(
+                    f"direct_api_{target_date.isoformat()}.json", data,
+                )
+
+                # Also add to captured_responses for context
+                self.captured_responses.append({"url": api_url, "data": data})
+
+                slots = self._parse_availability_grid(data, target_date)
+                if slots:
+                    logger.info(
+                        "Direct API: %d slots for %s",
+                        len(slots), target_date.isoformat(),
+                    )
+                    return slots
+
+            except Exception as e:
+                logger.debug("Direct API call failed for %s: %s", api_url[:80], e)
+
+        return []
+
     # ── Network interception ─────────────────────────────────────────
 
     async def _on_request(self, request: Request):
@@ -236,7 +605,19 @@ class AvailabilityChecker:
             try:
                 body = await response.json()
                 self.captured_responses.append({"url": url, "data": body})
-                logger.info("Captured API response: %s", url)
+                # Log response summary
+                body_str = json.dumps(body, default=str)[:2000]
+                logger.info(
+                    "Captured API response: %s (type=%s, size=%d, preview=%.500s)",
+                    url, type(body).__name__, len(json.dumps(body, default=str)),
+                    body_str,
+                )
+                # Extra diagnostics for availability grid endpoint
+                if "quickreservation" in url_lower and "availability" in url_lower:
+                    logger.info(
+                        "AVAILABILITY API STRUCTURE: %s",
+                        self._describe_structure(body),
+                    )
             except Exception:
                 pass
 
@@ -255,9 +636,19 @@ class AvailabilityChecker:
         all_slots = []
 
         async with async_playwright() as p:
+            logger.info("Launching Chromium browser...")
             browser = await p.chromium.launch(
                 headless=not self.settings.debug_headed,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-extensions",
+                    "--disable-background-networking",
+                    "--single-process",
+                ],
             )
+            logger.info("Browser launched, creating context...")
             context = await browser.new_context(
                 viewport={"width": 1280, "height": 800},
                 user_agent=(
@@ -266,13 +657,30 @@ class AvailabilityChecker:
                     "Chrome/120.0.0.0 Safari/537.36"
                 ),
             )
+            logger.info("Context created, opening page...")
             page = await context.new_page()
+            logger.info("Page ready, starting scrape")
             page.on("request", self._on_request)
             page.on("response", self._on_response)
 
+            # Log in for accurate court availability (anonymous users
+            # see courts as unavailable — only equipment is visible)
+            logged_in = await self._login(page)
+            logger.info(
+                "Login status: %s",
+                "authenticated" if logged_in else "anonymous (limited)",
+            )
+
             try:
-                # Quick reservation page — shows all McFetridge resources directly
-                all_slots = await self._check_modern_portal(page)
+                # Strategy 1: Quick Reserve page (real booking path)
+                all_slots = await self._check_quick_reserve(page)
+
+                # Strategy 2: Activity search with tennis keywords (fallback)
+                if not all_slots:
+                    logger.info(
+                        "Quick Reserve found 0 slots, trying activity search..."
+                    )
+                    all_slots = await self._check_activity_search(page)
 
             except Exception as e:
                 logger.exception("Scraper error: %s", e)
@@ -308,73 +716,909 @@ class AvailabilityChecker:
 
         return all_slots
 
-    # ── Modern portal ────────────────────────────────────────────────
+    # ── Authentication ────────────────────────────────────────────────
 
-    async def _check_modern_portal(self, page: Page) -> list[dict]:
-        """Navigate the quick reservation page and extract available slots.
+    async def _login(self, page: Page) -> bool:
+        """Log in to ActiveNet for accurate court availability.
 
-        The quick reservation page (groupId=2) shows all McFetridge resources
-        directly — Tennis Ct01-06, Pickleball, Ball Machines, etc.
-        No facility selection needed; all resources are visible at once.
+        Anonymous users see all court resources as status=1 (unavailable).
+        Only equipment (ball machines) shows real availability.  Logging in
+        reveals actual court availability data.
+
+        Strategy:
+        1. Navigate to sign-in page, wait for React to render
+        2. Dump form elements for diagnostics (what selectors exist?)
+        3. Try Playwright auto-waiting fill() (handles React render delays)
+        4. Fallback: JavaScript injection to fill + trigger React events
+        5. Intercept login API POST to discover the REST endpoint
+        6. Verify login via cookies and page indicators
         """
-        logger.info("Checking quick reservation page: %s", BOOKING_URL)
-        await page.goto(BOOKING_URL, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_load_state("networkidle", timeout=30000)
+        username = self.settings.activenet_username
+        password = self.settings.activenet_password
+        if not username or not password:
+            logger.warning(
+                "No ActiveNet credentials configured — court availability "
+                "will be limited (anonymous view hides real court status). "
+                "Set ACTIVENET_USERNAME and ACTIVENET_PASSWORD."
+            )
+            return False
+
+        logger.info("Logging in to ActiveNet as %s...", username)
+
+        # ── Log session cookies BEFORE login ────────────────────────────
+        try:
+            cookies_before = await page.context.cookies()
+            session_cookies = {
+                c["name"]: (c["value"][:20] + "..." if c["value"] else "(empty)")
+                for c in cookies_before
+                if "SESSION" in c["name"].upper() or "LOGGED" in c["name"].upper()
+            }
+            logger.info("Session cookies BEFORE login: %s", session_cookies)
+        except Exception as e:
+            logger.debug("Could not read cookies before login: %s", e)
+
+        # ── Navigate to the sign-in page ────────────────────────────────
+        signin_url = (
+            "https://anc.apm.activecommunities.com/chicagoparkdistrict"
+            "/signin?onlineSiteId=0&from_original_cui=true&locale=en-US"
+        )
+        try:
+            await page.goto(signin_url, wait_until="networkidle", timeout=30000)
+        except Exception as e:
+            logger.warning("Failed to load sign-in page: %s", e)
+            return False
+
+        # Wait longer for React/Redux SPA to render the form
+        await asyncio.sleep(5)
+        await self._save_diag(page, "login_page_loaded")
+
+        # ── Dump form elements for diagnostics ──────────────────────────
+        try:
+            form_info = await page.evaluate('''() => {
+                const els = document.querySelectorAll(
+                    'input, button[type="submit"], button, [role="button"]'
+                );
+                return Array.from(els).map(el => ({
+                    tag: el.tagName,
+                    type: el.type || '',
+                    name: el.name || '',
+                    id: el.id || '',
+                    placeholder: el.placeholder || '',
+                    dataQa: el.getAttribute('data-qa-id')
+                            || el.getAttribute('data-qa') || '',
+                    ariaLabel: el.getAttribute('aria-label') || '',
+                    className: (typeof el.className === 'string'
+                                ? el.className : '').substring(0, 100),
+                    visible: el.offsetParent !== null,
+                    text: (el.textContent || '').trim().substring(0, 40)
+                }));
+            }''')
+            logger.info(
+                "Sign-in page form elements (%d found): %s",
+                len(form_info),
+                json.dumps(form_info, indent=2),
+            )
+        except Exception as e:
+            logger.warning("Could not dump form elements: %s", e)
+
+        # ── Register login API interceptor ──────────────────────────────
+        login_api_info: dict = {}
+
+        async def _intercept_login(route, request):
+            url_lower = request.url.lower()
+            if request.method == "POST" and any(
+                kw in url_lower
+                for kw in ("login", "signin", "auth", "session")
+            ):
+                login_api_info["url"] = request.url
+                login_api_info["method"] = request.method
+                try:
+                    post_data = request.post_data or ""
+                    # Mask the password in logs
+                    masked = post_data.replace(password, "***") if password else post_data
+                    login_api_info["body_masked"] = masked[:200]
+                except Exception:
+                    pass
+                logger.info(
+                    "Intercepted login API: %s (method=%s)",
+                    request.url, request.method,
+                )
+            await route.continue_()
+
+        try:
+            await page.route("**/*", _intercept_login)
+        except Exception as e:
+            logger.debug("Could not register login interceptor: %s", e)
+
+        # ── Strategy A: Playwright auto-waiting fill() ──────────────────
+        email_selectors = [
+            'input[data-qa-id="login-email"]',
+            'input[type="email"]',
+            'input[name="email"]',
+            'input[name="loginName"]',
+            'input[name="username"]',
+            'input[id="email"]',
+            'input[placeholder*="email" i]',
+            'input[placeholder*="Email" i]',
+            'input[aria-label*="email" i]',
+            '#loginName',
+            # Broader fallbacks
+            'form input[type="text"]',
+            'form input[type="email"]',
+        ]
+        password_selectors = [
+            'input[data-qa-id="login-password"]',
+            'input[type="password"]',
+            'input[name="password"]',
+            '#password',
+        ]
+
+        email_filled = False
+        for sel in email_selectors:
+            try:
+                await page.fill(sel, username, timeout=3000)
+                logger.info("Filled email via auto-wait: %s", sel)
+                email_filled = True
+                break
+            except Exception:
+                continue
+
+        pw_filled = False
+        for sel in password_selectors:
+            try:
+                await page.fill(sel, password, timeout=3000)
+                logger.info("Filled password via auto-wait: %s", sel)
+                pw_filled = True
+                break
+            except Exception:
+                continue
+
+        # ── Strategy B: JavaScript injection fallback ───────────────────
+        if not email_filled or not pw_filled:
+            logger.info(
+                "Playwright fill() failed (email=%s, pw=%s) — trying JS injection",
+                email_filled, pw_filled,
+            )
+            try:
+                js_result = await page.evaluate('''(creds) => {
+                    const selectors = {
+                        email: [
+                            'input[type="email"]', 'input[name="email"]',
+                            'input[name="loginName"]', 'input[name="username"]',
+                            'input[data-qa-id="login-email"]',
+                            'input[placeholder*="email" i]',
+                            'input[id="email"]', '#loginName',
+                            'form input[type="text"]',
+                        ],
+                        password: [
+                            'input[type="password"]', 'input[name="password"]',
+                            'input[data-qa-id="login-password"]', '#password',
+                        ],
+                    };
+
+                    function findEl(sels) {
+                        for (const s of sels) {
+                            const el = document.querySelector(s);
+                            if (el && el.offsetParent !== null) return el;
+                        }
+                        return null;
+                    }
+
+                    const emailEl = findEl(selectors.email);
+                    const pwEl = findEl(selectors.password);
+                    if (!emailEl || !pwEl) {
+                        return {ok: false, emailFound: !!emailEl, pwFound: !!pwEl};
+                    }
+
+                    // Use native value setter to trigger React state updates
+                    const nativeSetter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'value'
+                    ).set;
+                    nativeSetter.call(emailEl, creds.username);
+                    emailEl.dispatchEvent(new Event('input', {bubbles: true}));
+                    emailEl.dispatchEvent(new Event('change', {bubbles: true}));
+                    nativeSetter.call(pwEl, creds.password);
+                    pwEl.dispatchEvent(new Event('input', {bubbles: true}));
+                    pwEl.dispatchEvent(new Event('change', {bubbles: true}));
+                    return {ok: true, emailTag: emailEl.tagName, pwTag: pwEl.tagName};
+                }''', {"username": username, "password": password})
+                logger.info("JS injection result: %s", js_result)
+                if js_result and js_result.get("ok"):
+                    email_filled = True
+                    pw_filled = True
+            except Exception as e:
+                logger.warning("JS injection failed: %s", e)
+
+        if not email_filled or not pw_filled:
+            logger.warning(
+                "Could not fill login form (email=%s, pw=%s)",
+                email_filled, pw_filled,
+            )
+            await self._save_diag(page, "login_form_fill_failed")
+            try:
+                await page.unroute("**/*", _intercept_login)
+            except Exception:
+                pass
+            return False
+
+        # ── Submit the form ─────────────────────────────────────────────
+        submit_selectors = [
+            'button[data-qa-id="login-submit"]',
+            'button[type="submit"]',
+            'button:has-text("Sign In")',
+            'button:has-text("Log In")',
+            'input[type="submit"]',
+        ]
+        clicked = False
+        for sel in submit_selectors:
+            try:
+                await page.click(sel, timeout=3000)
+                clicked = True
+                logger.info("Clicked login submit: %s", sel)
+                break
+            except Exception:
+                continue
+
+        if not clicked:
+            # Try pressing Enter as fallback
+            await page.keyboard.press("Enter")
+            logger.info("Pressed Enter to submit login form")
+
+        # Wait for login to process
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
         await asyncio.sleep(3)
 
-        await self._save_diag(page, "reservation_page_loaded")
-        await self._dump_dom_structure(page, "dom_structure_initial")
+        # ── Remove interceptor ──────────────────────────────────────────
+        try:
+            await page.unroute("**/*", _intercept_login)
+        except Exception:
+            pass
+
+        if login_api_info:
+            logger.info("Login API discovered: %s", json.dumps(login_api_info))
+
+        # ── Log session cookies AFTER login ─────────────────────────────
+        try:
+            cookies_after = await page.context.cookies()
+            session_cookies_after = {
+                c["name"]: (c["value"][:20] + "..." if c["value"] else "(empty)")
+                for c in cookies_after
+                if "SESSION" in c["name"].upper() or "LOGGED" in c["name"].upper()
+            }
+            logger.info("Session cookies AFTER login: %s", session_cookies_after)
+        except Exception as e:
+            logger.debug("Could not read cookies after login: %s", e)
+
+        # ── Verify login succeeded ──────────────────────────────────────
+        logged_in = await self._verify_login(page)
+        if logged_in:
+            logger.info("Login successful — authenticated session active")
+        else:
+            logger.warning(
+                "Login verification failed — continuing in anonymous mode"
+            )
+            await self._save_diag(page, "login_verification_failed")
+
+        return logged_in
+
+    async def _verify_login(self, page: Page) -> bool:
+        """Check if login succeeded by looking for authenticated indicators."""
+        # Check 1: Look for "Sign Out" / "My Account" text (logged in)
+        try:
+            signout = await page.query_selector(
+                'a:has-text("Sign Out"), a:has-text("Log Out"), '
+                'a:has-text("My Account")'
+            )
+            if signout and await signout.is_visible():
+                return True
+        except Exception:
+            pass
+
+        # Check 2: Check that "Sign In" link is gone
+        try:
+            signin = await page.query_selector('a:has-text("Sign In")')
+            if signin and await signin.is_visible():
+                return False
+        except Exception:
+            pass
+
+        # Check 3: Check cookies for logged session
+        try:
+            cookies = await page.context.cookies()
+            for c in cookies:
+                if "LOGGED" in c["name"].upper() and c["value"]:
+                    logger.info("Found logged session cookie: %s", c["name"])
+                    return True
+        except Exception:
+            pass
+
+        # Check 4: Page URL — if redirected away from signin, likely success
+        url = page.url
+        if "signin" not in url.lower() and "login" not in url.lower():
+            logger.info("Redirected away from login page: %s", url)
+            return True
+
+        return False
+
+    # ── Quick Reserve page ───────────────────────────────────────────
+
+    async def _check_quick_reserve(self, page: Page) -> list[dict]:
+        """Navigate the Quick Reserve page — the real court booking path.
+
+        Tries multiple URL strategies and SPA navigation to reach the
+        ActiveNet Quick Reserve availability grid.  Falls back to direct
+        API calls if the grid cannot be loaded via the UI.
+        """
+        # Verify login session is still active before scraping
+        try:
+            cookies = await page.context.cookies()
+            logged_session = [
+                c for c in cookies
+                if "LOGGED" in c["name"].upper() and c["value"]
+            ]
+            if logged_session:
+                logger.info(
+                    "Quick Reserve: logged session active (%s)",
+                    logged_session[0]["name"],
+                )
+            else:
+                logger.warning(
+                    "Quick Reserve: NO logged session cookie — "
+                    "running as anonymous (courts will show unavailable)"
+                )
+        except Exception:
+            pass
+
+        grid_found = False
+
+        # ── Phase 1: Try multiple Quick Reserve URLs ──────────────────
+        for i, url in enumerate(QUICK_RESERVE_URLS):
+            logger.info("Trying Quick Reserve URL [%d/%d]: %s", i + 1, len(QUICK_RESERVE_URLS), url)
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_load_state("networkidle", timeout=30000)
+                await asyncio.sleep(4)
+            except Exception as e:
+                logger.warning("URL %s failed to load: %s", url[:60], e)
+                continue
+
+            url_label = url.split("/")[-1][:25].replace("?", "_")
+            await self._save_diag(page, f"qr_url_{i}_{url_label}")
+            await self._dump_reservation_page_state(page, f"url_{i}")
+
+            logger.info("Quick Reserve URL [%d] landed at: %s", i + 1, page.url)
+
+            # Check if we already landed on the grid
+            if await self._detect_quick_reserve_grid(page):
+                grid_found = True
+                break
+
+            # Check if availability API was captured during navigation
+            if self._has_availability_api():
+                logger.info("Availability API captured from URL %s", url[:60])
+                grid_found = True
+                break
+
+            # Only on the first URL, try facility selection (the SPA might
+            # show a picker that loads the grid once a facility is chosen)
+            if i == 0:
+                await self._try_select_facility(page)
+                await asyncio.sleep(3)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+                await self._save_diag(page, "after_facility_select")
+
+                if await self._detect_quick_reserve_grid(page):
+                    grid_found = True
+                    break
+                if self._has_availability_api():
+                    grid_found = True
+                    break
+
+        # ── Phase 2: SPA internal navigation ──────────────────────────
+        if not grid_found:
+            logger.info("No URL landed on grid; trying SPA internal navigation...")
+            grid_found = await self._navigate_to_quick_reserve_via_spa(page)
+
+        # ── Phase 3: Log state regardless of success ──────────────────
+        current_url = page.url
+        logger.info("Quick Reserve page URL after navigation: %s", current_url)
+
+        try:
+            body_text = await page.inner_text("body")
+            logger.info(
+                "Quick Reserve body text (first 3000 chars): %s",
+                body_text[:3000].replace("\n", " | "),
+            )
+        except Exception as e:
+            logger.warning("Could not read body text: %s", e)
+
+        logger.info(
+            "Network URLs after Quick Reserve navigation (%d): %s",
+            len(self.all_network_urls),
+            json.dumps(
+                [u for u in self.all_network_urls if "activecommunities" in u],
+                indent=2,
+            )[:3000],
+        )
+
+        # Initialize date tracking — the grid loads with today's date
+        self._current_grid_date = date.today()
 
         slots = []
+        total_api_slots = 0
 
-        # Step 1: Extract resource names from the page
+        # Extract resource names from the page
         resource_names = await self._extract_resource_names(page)
         logger.info(
-            "Found %d resources on reservation page: %s",
+            "Found %d resources on Quick Reserve page: %s",
             len(resource_names), resource_names,
         )
 
-        # Step 2: Iterate through target dates
+        # Iterate through target dates
         target_dates = self._get_target_dates()
+
+        # Process initial API responses (captured during navigation).
+        if self.captured_responses and target_dates:
+            initial_api_slots = self._parse_captured_responses(
+                current_date=date.today(),
+                responses=self.captured_responses,
+            )
+            if initial_api_slots:
+                slots.extend(initial_api_slots)
+                total_api_slots += len(initial_api_slots)
+
+        # Track how many API responses we've already processed
+        api_responses_processed = len(self.captured_responses)
+
         for target_date in target_dates:
             logger.info("Checking date: %s", target_date.isoformat())
-            date_changed = await self._try_select_date(page, target_date)
-            if date_changed:
-                await page.wait_for_load_state("networkidle", timeout=15000)
-                await asyncio.sleep(2)
 
-            await self._save_diag(page, f"date_{target_date.isoformat()}")
+            if grid_found:
+                # Normal path: change date via date picker, extract from DOM/API
+                date_changed = await self._try_select_date(page, target_date)
+                if date_changed:
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2)
 
-            # Step 3: Extract available slots from DOM
-            page_slots = await self._extract_slots_from_dom(page, target_date)
+                await self._save_diag(page, f"date_{target_date.isoformat()}")
 
-            # Enrich slots with resource names from the page if needed
-            for slot in page_slots:
-                court = slot.get("court_name", "")
-                if not court or len(court) < 8:
-                    matched = self._match_slot_to_resource(slot, resource_names)
-                    if matched:
-                        slot["court_name"] = matched
+                # Parse any NEW captured API responses with this date
+                new_responses = self.captured_responses[api_responses_processed:]
+                api_slots_for_date: list[dict] = []
+                if new_responses:
+                    api_slots_for_date = self._parse_captured_responses(
+                        current_date=target_date,
+                        responses=new_responses,
+                    )
+                    if api_slots_for_date:
+                        slots.extend(api_slots_for_date)
+                        total_api_slots += len(api_slots_for_date)
+                    api_responses_processed = len(self.captured_responses)
 
-            slots.extend(page_slots)
+                # Extract available slots from DOM only if API didn't find
+                # any for this date (they represent the same grid — API is
+                # more reliable with exact resource names and times).
+                if api_slots_for_date:
+                    logger.info(
+                        "Skipping DOM extraction for %s — API already "
+                        "parsed %d slots",
+                        target_date.isoformat(),
+                        len(api_slots_for_date),
+                    )
+                else:
+                    page_slots = await self._extract_slots_from_dom(
+                        page, target_date,
+                    )
 
-        # Also check captured API responses for slot data
-        api_slots = self._parse_captured_responses()
-        if api_slots:
-            slots.extend(api_slots)
+                    # Enrich slots with resource names from the page
+                    for slot in page_slots:
+                        court = slot.get("court_name", "")
+                        if not court or len(court) < 8:
+                            matched = self._match_slot_to_resource(
+                                slot, resource_names,
+                            )
+                            if matched:
+                                slot["court_name"] = matched
 
-        # Dump DOM structure after all navigation
-        await self._dump_dom_structure(page, "dom_structure_final")
+                    slots.extend(page_slots)
+            else:
+                # Grid never loaded — try direct API call as last resort
+                direct_slots = await self._try_direct_availability_api(
+                    page, target_date,
+                )
+                if direct_slots:
+                    slots.extend(direct_slots)
+                    total_api_slots += len(direct_slots)
 
+        await self._dump_dom_structure(page, "dom_quick_reserve_final")
+
+        dom_slot_count = len(slots) - total_api_slots
         logger.info(
-            "SCRAPER SUMMARY: captured_responses=%d, network_urls=%d, "
-            "dom_slots=%d, api_slots=%d, total=%d, resources=%d",
-            len(self.captured_responses), len(self.all_network_urls),
-            len(slots) - len(api_slots), len(api_slots), len(slots),
+            "QUICK RESERVE SUMMARY: grid_found=%s, captured_responses=%d, "
+            "network_urls=%d, dom_slots=%d, api_slots=%d, total=%d, resources=%d",
+            grid_found, len(self.captured_responses), len(self.all_network_urls),
+            dom_slot_count, total_api_slots, len(slots),
             len(resource_names),
         )
 
         return slots
+
+    # ── Activity search (fallback) ───────────────────────────────────
+
+    async def _check_activity_search(self, page: Page) -> list[dict]:
+        """Search for tennis court time activities.
+
+        Fallback strategy: search ActiveNet's activity listing for tennis
+        court time at McFetridge.  First tries a targeted search for
+        'tennis court time mcfetridge', then a broader search.
+        """
+        slots = []
+
+        for label, url in [
+            ("tennis+mcfetridge", ACTIVITY_SEARCH_URL),
+            ("mcfetridge (broad)", ACTIVITY_SEARCH_BROAD_URL),
+        ]:
+            if slots:
+                break  # Already found results with previous search
+
+            logger.info("Activity search [%s]: %s", label, url)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_load_state("networkidle", timeout=30000)
+            await asyncio.sleep(5)
+
+            await self._save_diag(page, f"activity_search_{label}")
+
+            # Log page body text for debugging
+            try:
+                body_text = await page.inner_text("body")
+                logger.info(
+                    "Activity search [%s] body text (first 2000 chars): %s",
+                    label, body_text[:2000].replace("\n", " | "),
+                )
+            except Exception:
+                pass
+
+            # Find activity links — try multiple selector patterns
+            activity_links = await page.evaluate("""
+                () => {
+                    const links = [];
+                    // Pattern 1: detail links
+                    document.querySelectorAll(
+                        'a[href*="/activity/search/detail/"]'
+                    ).forEach(el => {
+                        links.push({
+                            href: el.href,
+                            text: (el.textContent || '').trim().substring(0, 200),
+                        });
+                    });
+                    // Pattern 2: activity links (broader)
+                    if (links.length === 0) {
+                        document.querySelectorAll(
+                            'a[href*="/activity/"], a[href*="/Activity_Search/"]'
+                        ).forEach(el => {
+                            links.push({
+                                href: el.href,
+                                text: (el.textContent || '').trim().substring(0, 200),
+                            });
+                        });
+                    }
+                    return links;
+                }
+            """)
+
+            logger.info(
+                "Activity search [%s]: found %d activity links",
+                label, len(activity_links),
+            )
+
+            # Prioritize tennis-related links
+            def _tennis_score(link):
+                text = (link.get("text", "") or "").lower()
+                if "tennis" in text and "ct" in text:
+                    return 0
+                if "court time" in text:
+                    return 1
+                if "tennis" in text:
+                    return 2
+                return 3
+
+            activity_links.sort(key=_tennis_score)
+            self._save_diag_json(f"activity_links_{label}.json", activity_links)
+
+            # Visit each activity detail page (up to 15)
+            for link in activity_links[:15]:
+                href = link.get("href", "")
+                name = link.get("text", "").strip()
+                if not href or not href.startswith("http"):
+                    continue
+
+                # Skip obviously non-tennis activities
+                name_lower = name.lower()
+                if any(skip in name_lower for skip in [
+                    "music", "dance", "gymnastics", "swimming", "hockey",
+                    "skating", "soccer", "basketball", "yoga", "fitness",
+                    "camp", "cooking", "art",
+                ]):
+                    logger.info("Skipping non-tennis activity: %s", name[:60])
+                    continue
+
+                logger.info("Checking activity: %s", name[:80])
+                responses_before = len(self.captured_responses)
+
+                try:
+                    await page.goto(
+                        href, wait_until="domcontentloaded", timeout=30000,
+                    )
+                    await page.wait_for_load_state("networkidle", timeout=30000)
+                    await asyncio.sleep(3)
+
+                    # Extract court name from the activity detail page
+                    court_name = await self._extract_court_name_from_detail(
+                        page, name,
+                    )
+                    logger.info(
+                        "COURT_NAME: link_text=%r → extracted=%r",
+                        name[:60], court_name,
+                    )
+
+                    # Extract time slots for each target date
+                    target_dates = self._get_target_dates()
+                    for td in target_dates:
+                        page_slots = await self._extract_slots_from_dom(page, td)
+                        for s in page_slots:
+                            if court_name and (
+                                not s.get("court_name")
+                                or len(s["court_name"]) < 8
+                            ):
+                                s["court_name"] = court_name
+                        slots.extend(page_slots)
+
+                    # Parse API responses captured during this page load
+                    new_responses = self.captured_responses[responses_before:]
+                    for resp in new_responses:
+                        per_activity_slots = self._parse_single_response(resp)
+                        for s in per_activity_slots:
+                            if court_name and (
+                                not s.get("court_name")
+                                or len(s["court_name"]) < 8
+                            ):
+                                s["court_name"] = court_name
+                        slots.extend(per_activity_slots)
+
+                except Exception as e:
+                    logger.warning(
+                        "Error loading activity %s: %s", name[:50], e,
+                    )
+
+        logger.info("Activity search total: %d raw slots found", len(slots))
+        return slots
+
+    async def _extract_court_name_from_detail(
+        self, page: Page, link_text: str,
+    ) -> str:
+        """Extract a clean court/facility name from an activity detail page."""
+        # Try the page heading first
+        heading = await page.evaluate("""
+            () => {
+                const h = document.querySelector(
+                    'h1, h2, [class*="activity-name"], '
+                    + '[class*="activityName"], [class*="title"]'
+                );
+                return h ? h.textContent.trim() : '';
+            }
+        """)
+
+        # Try to extract from API responses (most reliable)
+        for resp in reversed(self.captured_responses[-4:]):
+            data = resp.get("data")
+            if isinstance(data, dict):
+                body = data.get("body", data)
+                if isinstance(body, dict):
+                    api_name = (
+                        body.get("activityName", "")
+                        or body.get("name", "")
+                        or body.get("description", "")
+                    )
+                    if api_name:
+                        match = FACILITY_RE.search(api_name)
+                        if match:
+                            return match.group(1)
+
+        # Try heading text
+        for candidate in [heading, link_text]:
+            if candidate:
+                match = FACILITY_RE.search(candidate)
+                if match:
+                    return match.group(1)
+
+        return link_text.strip()[:80]
+
+    # ── Facility selection ───────────────────────────────────────────
+
+    async def _try_select_facility(self, page: Page):
+        """Try to search/select McFetridge tennis courts on the Quick Reserve page.
+
+        Tries multiple strategies to accommodate ActiveNet UI changes:
+        A) Fill search/filter inputs
+        B) Click text links/buttons
+        C) Select from HTML dropdowns
+        D) Interact with React combo-boxes / custom dropdowns
+        E) Click facility cards/tiles
+        F) Check if resources are already visible (no selection needed)
+        """
+        # Strategy A: Fill search/filter inputs
+        search_selectors = [
+            "input[type='search']",
+            "input[type='text'][placeholder*='search' i]",
+            "input[type='text'][placeholder*='facility' i]",
+            "input[type='text'][placeholder*='location' i]",
+            "input[type='text'][placeholder*='center' i]",
+            "input[name*='search' i]",
+            "input[name*='filter' i]",
+            "input[id*='search' i]",
+            "input[class*='search' i]",
+            "[class*='an-search'] input",
+            "[class*='search-bar'] input",
+            "[class*='filter-input'] input",
+        ]
+        for sel in search_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    await el.fill("McFetridge Tennis")
+                    await el.press("Enter")
+                    logger.info("Filled search input: %s", sel)
+                    await asyncio.sleep(2)
+                    return
+            except Exception:
+                continue
+
+        # Strategy B: Click on text links/buttons (expanded targets)
+        text_targets = [
+            "text=Tennis",
+            "text=McFetridge",
+            "text=Court Time",
+            "text=Quick Reserve",
+            "text=Make a Reservation",
+            "a:has-text('Tennis')",
+            "button:has-text('Tennis')",
+            "a:has-text('McFetridge')",
+            "button:has-text('McFetridge')",
+            "a:has-text('Court Time')",
+            "button:has-text('Court Time')",
+            "[role='option']:has-text('Tennis')",
+            "[role='option']:has-text('McFetridge')",
+            "[role='listitem']:has-text('Tennis')",
+            "[role='listitem']:has-text('McFetridge')",
+        ]
+        for sel in text_targets:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    await el.click()
+                    logger.info("Clicked facility selector: %s", sel)
+                    await asyncio.sleep(2)
+                    return
+            except Exception:
+                continue
+
+        # Strategy C: Select from HTML dropdowns
+        dropdowns = await page.query_selector_all("select")
+        for dropdown in dropdowns:
+            try:
+                if not await dropdown.is_visible():
+                    continue
+                options = await dropdown.query_selector_all("option")
+                for opt in options:
+                    text = (await opt.text_content() or "").lower()
+                    if "tennis" in text or "mcfetridge" in text:
+                        value = await opt.get_attribute("value")
+                        if value:
+                            await dropdown.select_option(value=value)
+                            logger.info(
+                                "Selected from dropdown: %s", text,
+                            )
+                            return
+            except Exception:
+                continue
+
+        # Strategy D: React combo-boxes / custom dropdowns
+        combo_selectors = [
+            "[role='combobox']",
+            "[role='listbox']",
+            "[class*='an-dropdown']",
+            "[class*='an-select']",
+            "[class*='combo-box']",
+            "[class*='combobox']",
+            "[class*='select-facility']",
+            "[class*='center-picker']",
+            "[class*='location-filter']",
+            "[class*='facility-filter']",
+        ]
+        for sel in combo_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    # Click to open the dropdown
+                    await el.click()
+                    logger.info("Opened React dropdown: %s", sel)
+                    await asyncio.sleep(1)
+                    # Look for McFetridge/Tennis option inside
+                    option_sels = [
+                        "[role='option']:has-text('McFetridge')",
+                        "[role='option']:has-text('Tennis')",
+                        "li:has-text('McFetridge')",
+                        "li:has-text('Tennis')",
+                        "[class*='option']:has-text('McFetridge')",
+                        "[class*='option']:has-text('Tennis')",
+                    ]
+                    for opt_sel in option_sels:
+                        try:
+                            opt_el = await page.query_selector(opt_sel)
+                            if opt_el and await opt_el.is_visible():
+                                await opt_el.click()
+                                logger.info(
+                                    "Selected React dropdown option: %s", opt_sel,
+                                )
+                                await asyncio.sleep(2)
+                                return
+                        except Exception:
+                            continue
+                    # Close the dropdown if no option was selected
+                    await page.keyboard.press("Escape")
+            except Exception:
+                continue
+
+        # Strategy E: Click facility cards/tiles
+        card_selectors = [
+            "[class*='card']:has-text('McFetridge')",
+            "[class*='card']:has-text('Tennis')",
+            "[class*='tile']:has-text('McFetridge')",
+            "[class*='tile']:has-text('Tennis')",
+            "[class*='item']:has-text('McFetridge')",
+            "[class*='option']:has-text('McFetridge')",
+            "li:has-text('McFetridge')",
+            "div[class*='center']:has-text('McFetridge')",
+            "div[class*='facility']:has-text('McFetridge')",
+        ]
+        for sel in card_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    await el.click()
+                    logger.info("Clicked facility card/tile: %s", sel)
+                    await asyncio.sleep(2)
+                    return
+            except Exception:
+                continue
+
+        # Strategy F: Check if resources are already visible
+        # (the page may have auto-selected McFetridge or doesn't need selection)
+        try:
+            resource_names = await self._extract_resource_names(page)
+            if any(
+                "tennis" in r.lower() or "mcfetridge" in r.lower()
+                for r in resource_names
+            ):
+                logger.info(
+                    "McFetridge resources already visible (%d), "
+                    "no facility selection needed",
+                    len(resource_names),
+                )
+                return
+        except Exception:
+            pass
+
+        logger.warning("Could not find facility selector on Quick Reserve page")
 
     # ── Resource extraction ─────────────────────────────────────────
 
@@ -509,65 +1753,192 @@ class AvailabilityChecker:
     # ── Date selection ───────────────────────────────────────────────
 
     async def _try_select_date(self, page: Page, target_date: date) -> bool:
-        """Try to select a specific date in the booking calendar."""
-        date_str = target_date.strftime("%m/%d/%Y")
+        """Select a date in the ActiveNet Quick Reserve calendar popup.
+
+        Strategy: Click input → wait for popup → use JS to mark the right
+        day cell → use Playwright's trusted click on the marked cell.
+
+        IMPORTANT: Must use Playwright click (not JS cell.click()) because
+        the React SPA only responds to trusted browser events.
+        """
         date_iso = target_date.isoformat()
-        date_mmdd = target_date.strftime("%m/%d")
-        day_num = str(target_date.day)
 
-        # Try date input fields
-        date_inputs = await page.query_selector_all(
-            "input[type='date'], input[name*='date' i], input[id*='date' i], "
-            "input[placeholder*='date' i], input[class*='date' i]"
-        )
-        for inp in date_inputs:
-            try:
-                await inp.fill("")
-                await inp.fill(date_str)
-                await inp.press("Enter")
-                logger.info("Filled date input: %s", date_str)
-                return True
-            except Exception:
-                continue
-
-        # Try calendar day buttons (common in date pickers)
-        calendar_selectors = [
-            f"[data-date='{date_iso}']",
-            f"[data-date='{date_str}']",
-            f"[aria-label*='{target_date.strftime('%B')}'][aria-label*='{day_num}']",
-            f"td[data-day='{day_num}']",
-            f".calendar-day:has-text('{day_num}')",
-            f"[class*='day']:has-text('{day_num}')",
+        # Try multiple date input selectors (ActiveNet UI may change)
+        date_input_selectors = [
+            'input[aria-label="Date picker, current date"]',
+            'input[aria-label*="date" i]',
+            'input[type="date"]',
+            'input[class*="date-picker"]',
+            'input[class*="datepicker"]',
+            '[class*="an-date-picker"] input',
+            '[class*="date-picker"] input',
+            'input[placeholder*="date" i]',
+            'input[name*="date" i]',
         ]
-        for sel in calendar_selectors:
-            try:
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    await el.click()
-                    logger.info("Clicked calendar day: %s", sel)
-                    return True
-            except Exception:
-                continue
 
-        # Try next/forward buttons to navigate to the right date
-        nav_selectors = [
-            "[class*='next']",
-            "[aria-label*='next']",
-            "[class*='forward']",
-            "button:has-text('>')",
-            "button:has-text('Next')",
-        ]
-        for sel in nav_selectors:
+        el = None
+        for date_input_sel in date_input_selectors:
             try:
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    await el.click()
-                    logger.info("Clicked date nav: %s", sel)
-                    await asyncio.sleep(1)
+                candidate = await page.query_selector(date_input_sel)
+                if candidate and await candidate.is_visible():
+                    el = candidate
+                    logger.debug("Found date picker with selector: %s", date_input_sel)
                     break
             except Exception:
                 continue
 
+        try:
+            if not el:
+                logger.warning("Date picker input not found with any selector")
+                return False
+
+            current_val = await el.evaluate("el => el.value") or ""
+            logger.info(
+                "Navigating date: current='%s', target=%s",
+                current_val, date_iso,
+            )
+
+            # Click the input to open the calendar dropdown
+            await el.click()
+
+            # Wait for the popup to actually appear in the DOM
+            # Try multiple popup selectors
+            popup_selectors = [
+                ".an-date-picker__popper",
+                "[class*='date-picker'] [class*='popper']",
+                "[class*='datepicker'] [class*='popup']",
+                "[class*='calendar-popup']",
+                "[role='dialog'][class*='date']",
+            ]
+            popup_appeared = False
+            for popup_sel in popup_selectors:
+                try:
+                    await page.wait_for_selector(
+                        popup_sel, state="visible", timeout=2000,
+                    )
+                    popup_appeared = True
+                    logger.debug("Calendar popup appeared: %s", popup_sel)
+                    break
+                except Exception:
+                    continue
+
+            if not popup_appeared:
+                logger.warning("Calendar popup did not appear after clicking input")
+                return False
+
+            await asyncio.sleep(0.3)
+
+            # Use JS to find the right day cell and mark it with a data attribute.
+            # We do NOT click it with JS — we need Playwright's trusted click.
+            mark_result = await page.evaluate("""
+                (dayNum) => {
+                    // Remove any previous markers
+                    document.querySelectorAll('[data-target-day]').forEach(
+                        el => el.removeAttribute('data-target-day')
+                    );
+
+                    // Try multiple popup container selectors
+                    const popperSelectors = [
+                        '.an-date-picker__popper',
+                        '[class*="date-picker"] [class*="popper"]',
+                        '[class*="datepicker"] [class*="popup"]',
+                        '[class*="calendar-popup"]',
+                        '[role="dialog"]',
+                    ];
+                    let popper = null;
+                    for (const sel of popperSelectors) {
+                        popper = document.querySelector(sel);
+                        if (popper) break;
+                    }
+                    if (!popper) return { found: false, reason: 'no popper' };
+
+                    const cells = popper.querySelectorAll('td');
+                    let allTexts = [];
+
+                    for (const cell of cells) {
+                        const text = (cell.textContent || '').trim();
+                        allTexts.push(text);
+                        if (text !== String(dayNum)) continue;
+
+                        // Skip adjacent-month cells
+                        const cls = (cell.className || '').toLowerCase();
+                        if (cls.includes('prev-month') || cls.includes('next-month') ||
+                            cls.includes('disabled') || cls.includes('other-month')) {
+                            continue;
+                        }
+
+                        if (cell.offsetParent !== null) {
+                            // Mark this cell so Playwright can find and click it
+                            cell.setAttribute('data-target-day', 'true');
+                            return {
+                                found: true,
+                                className: cell.className || '',
+                                tdCount: cells.length,
+                            };
+                        }
+                    }
+
+                    return {
+                        found: false,
+                        tdCount: cells.length,
+                        allTexts: allTexts.slice(0, 42),
+                        reason: 'no matching cell for day ' + dayNum,
+                    };
+                }
+            """, target_date.day)
+
+            if mark_result and mark_result.get("found"):
+                # Use Playwright's trusted click on the marked cell
+                marked = await page.query_selector("td[data-target-day='true']")
+                if marked:
+                    await marked.click()
+                    logger.info(
+                        "Clicked calendar day %d via Playwright (class=%s)",
+                        target_date.day, mark_result.get("className", ""),
+                    )
+                    await asyncio.sleep(2)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                    self._current_grid_date = target_date
+                    return True
+
+            logger.warning(
+                "Calendar popup: could not find day %d: %s",
+                target_date.day, mark_result,
+            )
+
+            # Fallback: use Playwright's :has-text selector directly
+            # (less precise for single-digit days but works as last resort)
+            fallback_sels = [
+                f".an-date-picker__popper td:has-text('{target_date.day}')",
+                f"[class*='date-picker'] td:has-text('{target_date.day}')",
+                f"[class*='calendar'] td:has-text('{target_date.day}')",
+                f"[role='dialog'] td:has-text('{target_date.day}')",
+            ]
+            for fallback_sel in fallback_sels:
+                try:
+                    day_el = await page.query_selector(fallback_sel)
+                    if day_el and await day_el.is_visible():
+                        await day_el.click()
+                        logger.info("Clicked calendar day %d via fallback selector", target_date.day)
+                        await asyncio.sleep(2)
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=10000)
+                        except Exception:
+                            pass
+                        self._current_grid_date = target_date
+                        return True
+                except Exception:
+                    continue
+
+            # Close popup if nothing was clicked
+            await page.keyboard.press("Escape")
+        except Exception as e:
+            logger.warning("Date selection failed: %s", e)
+
+        logger.warning("Could not change date to %s", date_iso)
         return False
 
     # ── Slot extraction from DOM ─────────────────────────────────────
@@ -670,45 +2041,87 @@ class AvailabilityChecker:
         except Exception as e:
             logger.warning("DOM scraping error (targeted): %s", e)
 
-        # Strategy 2b: Broad DOM scan — find ALL elements with time text
+        # Strategy 2c: ActiveNet Quick Reserve grid scan.
+        # The grid uses: .resource-header-cell__title for resource names,
+        # td.td-grid-cell--disabled for unavailable cells (gray),
+        # td.td-grid-cell (without --disabled) for available cells (white).
+        # Time headers are in thead th .header-cell elements.
+        strategy_counts["grid_dom"] = 0
         try:
-            broad_slots = await page.evaluate("""
+            grid_slots = await page.evaluate("""
                 () => {
                     const results = [];
-                    const timePattern = /\\d{1,2}:\\d{2}\\s*(AM|PM)/i;
 
-                    // Walk all leaf-ish elements (small text content)
-                    document.querySelectorAll('td, div, span, li, a, button, p, label').forEach(el => {
-                        const fullText = (el.textContent || '').trim();
+                    // ActiveNet Quick Reserve grid container
+                    const grid = document.querySelector(
+                        '.an-resource-grid, [data-qa-id="resource-grid-view-container"]'
+                    );
+                    if (!grid) return results;
 
-                        if (fullText.length > 500) return; // Skip large containers
-                        if (!timePattern.test(fullText)) return;
+                    const table = grid.querySelector('table');
+                    if (!table) return results;
 
-                        // Walk up to find context (facility name, date, etc.)
-                        let contextEl = el;
-                        let contextText = '';
-                        for (let i = 0; i < 5 && contextEl; i++) {
-                            contextEl = contextEl.parentElement;
-                            if (contextEl) {
-                                const ct = (contextEl.textContent || '').trim();
-                                if (ct.length < 1000 && ct.length > contextText.length) {
-                                    contextText = ct;
-                                }
+                    // Extract time slot headers from <thead>
+                    const timeHeaders = [];
+                    table.querySelectorAll('thead th .header-cell, thead th').forEach(th => {
+                        const text = (th.textContent || '').trim();
+                        const m = text.match(/\\d{1,2}:\\d{2}\\s*(?:AM|PM)/i);
+                        if (m) timeHeaders.push(m[0]);
+                    });
+
+                    if (timeHeaders.length < 3) return results;
+
+                    // Process each resource row in <tbody>
+                    const rows = table.querySelectorAll('tbody tr, tbody [role="row"]');
+                    rows.forEach((row, rowIdx) => {
+                        // Resource name: target the most specific element first
+                        // to avoid picking up junk from sibling elements (type tags,
+                        // selection state text like "Unselected", etc.)
+                        let resourceName = '';
+                        const titleEl = row.querySelector('.resource-header-cell__title');
+                        if (titleEl) {
+                            // Use innerText to skip hidden content; fallback to textContent
+                            resourceName = (titleEl.innerText || titleEl.textContent || '').trim();
+                        }
+                        if (!resourceName) {
+                            const nameEl = row.querySelector('.resource-header-cell__name');
+                            if (nameEl) {
+                                resourceName = (nameEl.innerText || nameEl.textContent || '').trim();
                             }
                         }
+                        if (!resourceName) {
+                            // Last resort: th text, but strip known junk
+                            const th = row.querySelector('th.table-sticky-left');
+                            if (th) {
+                                resourceName = (th.innerText || th.textContent || '').trim();
+                            }
+                        }
+                        // Strip ActiveNet prefix junk: "Unselected"/"Selected" state
+                        // and single-char type tags (E/F/etc.) that leak from sibling elements
+                        resourceName = resourceName
+                            .replace(/^(?:Un)?[Ss]elected/i, '')
+                            .replace(/^[A-Z](?=[A-Z][a-z])/, '')
+                            .trim();
+                        if (!resourceName) return;
 
-                        results.push({
-                            text: fullText.substring(0, 300),
-                            contextText: contextText.substring(0, 500),
-                            className: el.className || '',
-                            tag: el.tagName,
-                            parentClass: (el.parentElement?.className) || '',
-                            dataAttrs: Object.fromEntries(
-                                Array.from(el.attributes || [])
-                                    .filter(a => a.name.startsWith('data-'))
-                                    .map(a => [a.name, a.value])
-                            ),
-                            ariaLabel: el.getAttribute('aria-label') || '',
+                        // Get all td cells (excluding the th header cell)
+                        const cells = row.querySelectorAll('td.td-grid-cell');
+
+                        cells.forEach((cell, colIdx) => {
+                            if (colIdx >= timeHeaders.length) return;
+
+                            const cls = (cell.className || '').toLowerCase();
+                            // ActiveNet: --disabled class = unavailable (gray)
+                            // Absence of --disabled = available (white)
+                            const isDisabled = cls.includes('td-grid-cell--disabled');
+
+                            if (!isDisabled) {
+                                results.push({
+                                    resourceName: resourceName.substring(0, 100),
+                                    time: timeHeaders[colIdx],
+                                    rowIndex: rowIdx,
+                                });
+                            }
                         });
                     });
 
@@ -716,19 +2129,104 @@ class AvailabilityChecker:
                 }
             """)
 
-            if broad_slots:
-                logger.info("Broad DOM scan found %d elements with time text", len(broad_slots))
-                # Save for diagnostics
+            if grid_slots:
+                logger.info("Grid-aware DOM scan found %d available cells", len(grid_slots))
+                sample_names = sorted(set(
+                    c.get("resourceName", "")[:60] for c in grid_slots[:50]
+                ))
+                logger.info("Grid DOM resourceNames: %s", sample_names)
                 self._save_diag_json(
-                    f"broad_dom_{target_date.isoformat()}.json", broad_slots
+                    f"grid_dom_{target_date.isoformat()}.json", grid_slots
                 )
-                for el in broad_slots:
-                    parsed = self._parse_dom_element_broad(el, target_date)
-                    if parsed:
-                        slots.append(parsed)
-                        strategy_counts["broad_dom"] += 1
+
+                for cell in grid_slots:
+                    court_name = cell.get("resourceName", "")
+                    time_str = cell.get("time", "")
+                    if court_name and time_str:
+                        time_match = re.search(
+                            r'(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)', time_str
+                        )
+                        if time_match:
+                            hour = int(time_match.group(1))
+                            minute = int(time_match.group(2))
+                            ampm = time_match.group(3).upper()
+                            if ampm == "PM" and hour != 12:
+                                hour += 12
+                            elif ampm == "AM" and hour == 12:
+                                hour = 0
+                            slots.append({
+                                "date": target_date.isoformat(),
+                                "time": f"{hour:02d}:{minute:02d}",
+                                "court_name": court_name,
+                                "day_of_week": target_date.strftime("%A"),
+                                "duration_minutes": 60,
+                                "raw": {"source": "grid_dom_scan"},
+                            })
+                            strategy_counts["grid_dom"] += 1
         except Exception as e:
-            logger.warning("Broad DOM scan error: %s", e)
+            logger.warning("Grid-aware DOM scan error: %s", e)
+
+        # Strategy 2b: Broad DOM scan — find ALL elements with time text
+        # Only run as last resort if grid-aware scan found nothing
+        if not strategy_counts.get("grid_dom"):
+            try:
+                broad_slots = await page.evaluate("""
+                    () => {
+                        const results = [];
+                        const timePattern = /\\d{1,2}:\\d{2}\\s*(AM|PM)/i;
+
+                        // Walk all leaf-ish elements (small text content)
+                        document.querySelectorAll('td, div, span, li, a, button, p, label').forEach(el => {
+                            const fullText = (el.textContent || '').trim();
+
+                            if (fullText.length > 500) return; // Skip large containers
+                            if (!timePattern.test(fullText)) return;
+
+                            // Walk up to find context (facility name, date, etc.)
+                            let contextEl = el;
+                            let contextText = '';
+                            for (let i = 0; i < 5 && contextEl; i++) {
+                                contextEl = contextEl.parentElement;
+                                if (contextEl) {
+                                    const ct = (contextEl.textContent || '').trim();
+                                    if (ct.length < 1000 && ct.length > contextText.length) {
+                                        contextText = ct;
+                                    }
+                                }
+                            }
+
+                            results.push({
+                                text: fullText.substring(0, 300),
+                                contextText: contextText.substring(0, 500),
+                                className: el.className || '',
+                                tag: el.tagName,
+                                parentClass: (el.parentElement?.className) || '',
+                                dataAttrs: Object.fromEntries(
+                                    Array.from(el.attributes || [])
+                                        .filter(a => a.name.startsWith('data-'))
+                                        .map(a => [a.name, a.value])
+                                ),
+                                ariaLabel: el.getAttribute('aria-label') || '',
+                            });
+                        });
+
+                        return results;
+                    }
+                """)
+
+                if broad_slots:
+                    logger.info("Broad DOM scan found %d elements with time text", len(broad_slots))
+                    # Save for diagnostics
+                    self._save_diag_json(
+                        f"broad_dom_{target_date.isoformat()}.json", broad_slots
+                    )
+                    for el in broad_slots:
+                        parsed = self._parse_dom_element_broad(el, target_date)
+                        if parsed:
+                            slots.append(parsed)
+                            strategy_counts["broad_dom"] += 1
+            except Exception as e:
+                logger.warning("Broad DOM scan error: %s", e)
 
         # Strategy 3: Full page text analysis for time patterns
         if not slots:
@@ -740,11 +2238,28 @@ class AvailabilityChecker:
             except Exception:
                 pass
 
+        # Post-processing safety net: if all broad_dom slots have the same
+        # court_name, they are likely column headers misidentified as slots.
+        if strategy_counts["broad_dom"] > 0:
+            broad_court_names = {
+                s["court_name"] for s in slots
+                if s.get("raw", {}).get("source") == "broad_dom_scan"
+            }
+            if len(broad_court_names) == 1 and strategy_counts["broad_dom"] > 3:
+                logger.warning(
+                    "Broad DOM safety net: all %d broad slots have same court_name='%s' — "
+                    "likely column headers, discarding",
+                    strategy_counts["broad_dom"], broad_court_names.pop(),
+                )
+                slots = [s for s in slots if s.get("raw", {}).get("source") != "broad_dom_scan"]
+                strategy_counts["broad_dom"] = 0
+
         logger.info(
-            "DOM extraction for %s: redux=%d targeted=%d broad=%d text=%d total=%d",
+            "DOM extraction for %s: redux=%d targeted=%d grid=%d broad=%d text=%d total=%d",
             target_date.isoformat(),
             strategy_counts["redux"], strategy_counts["targeted_dom"],
-            strategy_counts["broad_dom"], strategy_counts["text"], len(slots),
+            strategy_counts["grid_dom"], strategy_counts["broad_dom"],
+            strategy_counts["text"], len(slots),
         )
 
         return slots
@@ -832,9 +2347,21 @@ class AvailabilityChecker:
         }
 
     def _parse_dom_element_broad(self, el: dict, target_date: date) -> dict | None:
-        """Parse DOM element with broader facility name matching (Strategy 2b)."""
+        """Parse DOM element with broader facility name matching (Strategy 2b).
+
+        Tightened to avoid false positives:
+        - Rejects header elements (th, class*=header)
+        - Rejects container elements (contextText with 3+ distinct facilities)
+        - Only uses FACILITY_RE for court name extraction (no generic fallback)
+        """
         text = el.get("text", "")
         if not text:
+            return None
+
+        # Reject header elements — these are column/row headers, not cells
+        tag = (el.get("tag", "") or "").upper()
+        class_name = (el.get("className", "") or "").lower()
+        if tag == "TH" or "header" in class_name or "column-header" in class_name:
             return None
 
         # Extract time
@@ -854,27 +2381,28 @@ class AvailabilityChecker:
         time_str = f"{hour:02d}:{minute:02d}"
 
         # Check for negative signals in class
-        class_name = (el.get("className", "") or "").lower()
         if any(x in class_name for x in ["unavailable", "booked", "disabled", "closed"]):
             return None
 
+        # Reject container elements: if contextText contains 3+ distinct
+        # facility names, this element is a container (e.g. grid wrapper),
+        # not a specific availability cell.
+        context = el.get("contextText", "") or ""
+        context_facilities = FACILITY_RE.findall(context)
+        # Deduplicate
+        unique_facilities = set(f.strip().lower() for f in context_facilities)
+        if len(unique_facilities) > 2:
+            return None
+
         # Search for facility name in text, contextText, ariaLabel
+        # Only use FACILITY_RE — no generic fallback that matches
+        # Pickleball/Ball Machine/Field/Room/Lane
         court_name = ""
-        for source in [text, el.get("contextText", ""), el.get("ariaLabel", "")]:
+        for source in [text, context, el.get("ariaLabel", "")]:
             match = FACILITY_RE.search(source or "")
             if match:
                 court_name = match.group(1).strip()
                 break
-
-        # If no regex match, try generic name extraction from context
-        if not court_name:
-            context = el.get("contextText", "")
-            name_match = re.search(
-                r'([\w\s]+(?:Court|Ct|Field|Room|Lane|Machine)\s*\d*)',
-                context or "", re.IGNORECASE
-            )
-            if name_match:
-                court_name = name_match.group(1).strip()
 
         if not court_name:
             return None
@@ -958,21 +2486,42 @@ class AvailabilityChecker:
             return fast
         return self._deep_extract_slots(data)
 
-    def _parse_captured_responses(self) -> list[dict]:
+    def _parse_captured_responses(
+        self,
+        current_date: date | None = None,
+        responses: list[dict] | None = None,
+    ) -> list[dict]:
         """Parse captured API responses for availability data."""
         slots = []
+        if current_date is None:
+            current_date = date.today() + timedelta(days=1)
 
-        for resp in self.captured_responses:
+        if responses is None:
+            responses = self.captured_responses
+
+        for resp in responses:
             data = resp.get("data")
             if not data:
                 continue
+            url = resp.get("url", "")
+
+            # Specialized path: Quick Reserve availability grid
+            if "quickreservation" in url.lower() and "availability" in url.lower():
+                grid_slots = self._parse_availability_grid(data, current_date)
+                if grid_slots:
+                    logger.info(
+                        "Grid parser found %d slots from %s",
+                        len(grid_slots), url,
+                    )
+                    slots.extend(grid_slots)
+                    continue
 
             # Fast path: known field names in flat list structures
             fast_slots = self._parse_response_fast(data)
             if fast_slots:
                 logger.info(
                     "Fast-path parsed %d slots from %s",
-                    len(fast_slots), resp.get("url", "?"),
+                    len(fast_slots), url,
                 )
                 slots.extend(fast_slots)
             else:
@@ -981,19 +2530,19 @@ class AvailabilityChecker:
                 if deep_slots:
                     logger.info(
                         "Deep extraction found %d potential slots from %s",
-                        len(deep_slots), resp.get("url", "?"),
+                        len(deep_slots), url,
                     )
                     slots.extend(deep_slots)
 
         logger.info(
             "API parsing: %d total slots from %d captured responses",
-            len(slots), len(self.captured_responses),
+            len(slots), len(responses),
         )
 
         # Save extraction diagnostics
-        if self.captured_responses:
+        if responses:
             self._save_diag_json("api_extraction.json", {
-                "total_responses": len(self.captured_responses),
+                "total_responses": len(responses),
                 "total_slots_found": len(slots),
                 "slots": [
                     {"time": s["time"], "date": s["date"], "court_name": s["court_name"]}
@@ -1095,11 +2644,11 @@ class AvailabilityChecker:
                             "false", "unavailable", "booked", "closed"
                         )
 
-            if time_val and available:
+            if time_val and available and name_val:
                 slots.append({
                     "date": date_val or "",
                     "time": time_val,
-                    "court_name": name_val or "",
+                    "court_name": name_val,
                     "day_of_week": "",
                     "duration_minutes": 60,
                     "raw": {"source": "deep_extraction", "path": path},
@@ -1118,6 +2667,237 @@ class AvailabilityChecker:
                     slots.extend(
                         self._deep_extract_slots(item, f"{path}[{i}]", depth + 1)
                     )
+
+        return slots
+
+    # ── Availability grid parser ────────────────────────────────────
+
+    def _describe_structure(self, data, depth: int = 0, max_depth: int = 4) -> str:
+        """Describe the nested structure of a JSON object for diagnostics."""
+        if depth >= max_depth:
+            return f"({type(data).__name__})"
+        if isinstance(data, dict):
+            items = []
+            for k, v in list(data.items())[:20]:
+                items.append(f"{k}: {self._describe_structure(v, depth + 1, max_depth)}")
+            return "{" + ", ".join(items) + "}"
+        elif isinstance(data, list):
+            if not data:
+                return "[]"
+            return f"[{self._describe_structure(data[0], depth + 1, max_depth)} x{len(data)}]"
+        elif isinstance(data, str):
+            return f'str({len(data)})'
+        elif isinstance(data, bool):
+            return str(data)
+        elif isinstance(data, (int, float)):
+            return str(data)
+        else:
+            return f"({type(data).__name__})"
+
+    def _parse_availability_grid(self, data: dict, current_date: date) -> list[dict]:
+        """Parse the Quick Reserve availability API response grid.
+
+        ActiveNet /rest/reservation/quickreservation/availability returns:
+        {
+          "body": {
+            "availability": {
+              "time_slots": ["06:00:00", "07:00:00", ...],
+              "time_increment": 60,
+              "resources": [
+                {
+                  "resourceName": "McFetridge Tennis Ct01",
+                  "resourceID": 123,
+                  "timeSlotDetails": [
+                    {"status": 0, "selected": false},  // 0=available
+                    {"status": 1, "selected": false},  // 1=unavailable/booked
+                    ...
+                  ]
+                }, ...
+              ]
+            }
+          }
+        }
+
+        ActiveNet uses status 0 for available slots and non-zero values
+        (typically 1) for booked/unavailable slots. Verified by cross-
+        referencing API status=0 counts against the DOM grid's non-disabled
+        cell counts — they match exactly per date (e.g. both ~46/221).
+        The website header confirms: "White boxes are available times.
+        Gray boxes are unavailable times."
+
+        Field names may use snake_case or camelCase depending on ActiveNet version.
+        """
+        slots = []
+
+        # Navigate to body.availability (ActiveNet response wrapper)
+        body = data.get("body", data)
+        avail = body.get("availability", body)
+
+        if not isinstance(avail, dict):
+            logger.debug("Availability grid: no 'availability' dict found")
+            return []
+
+        # time_slots can be snake_case or camelCase
+        time_slots = (
+            avail.get("time_slots")
+            or avail.get("timeSlots")
+            or []
+        )
+        if not time_slots:
+            logger.debug("Availability grid: no time_slots array")
+            return []
+
+        time_increment = (
+            avail.get("time_increment")
+            or avail.get("timeIncrement")
+            or 60
+        )
+
+        logger.info(
+            "Availability grid: %d time_slots, keys=%s",
+            len(time_slots), sorted(avail.keys()),
+        )
+
+        resources = avail.get("resources", [])
+        if not resources:
+            logger.info(
+                "Availability grid: no 'resources' array. Full structure: %s",
+                self._describe_structure(avail, max_depth=5),
+            )
+            return []
+
+        if not isinstance(resources[0], dict):
+            return []
+
+        # Log first resource structure for diagnostics
+        logger.info(
+            "Availability grid: resource[0] keys=%s",
+            sorted(resources[0].keys()),
+        )
+
+        # Dump the FULL structure of the first time_slot_detail entry
+        # to reveal all available fields beyond just "status"
+        for _res in resources:
+            _details = (
+                _res.get("timeSlotDetails")
+                or _res.get("time_slot_details")
+                or []
+            )
+            if _details and isinstance(_details[0], dict):
+                logger.info(
+                    "time_slot_detail FULL structure (resource=%s): %s",
+                    _res.get("resource_name", _res.get("resourceName", "?")),
+                    json.dumps(_details[0], default=str),
+                )
+                # Also log attendance field if present
+                att = _res.get("attendance")
+                if att is not None:
+                    logger.info(
+                        "resource attendance=%s (resource=%s)",
+                        att,
+                        _res.get("resource_name", _res.get("resourceName", "?")),
+                    )
+                break  # Only need one example
+
+        # Log status value distribution for diagnostics
+        status_dist: dict[int, int] = {}
+        for _res in resources:
+            _details = (
+                _res.get("timeSlotDetails")
+                or _res.get("time_slot_details")
+                or []
+            )
+            for _d in _details:
+                if isinstance(_d, dict):
+                    _s = _d.get("status")
+                    if _s is not None:
+                        status_dist[_s] = status_dist.get(_s, 0) + 1
+        logger.info(
+            "Availability grid status distribution: %s (total cells=%d)",
+            dict(sorted(status_dist.items())),
+            sum(status_dist.values()),
+        )
+
+        for res in resources:
+            # Resource name: try camelCase first, then snake_case
+            res_name = str(
+                res.get("resourceName", "")
+                or res.get("resource_name", "")
+                or res.get("name", "")
+            ).strip()
+
+            # Per-time-slot availability: timeSlotDetails or time_slot_details
+            details = (
+                res.get("timeSlotDetails")
+                or res.get("time_slot_details")
+                or []
+            )
+
+            # Fallback: find ANY list with same length as time_slots
+            if not details:
+                for key, val in res.items():
+                    if isinstance(val, list) and len(val) == len(time_slots):
+                        details = val
+                        logger.info(
+                            "Availability grid: using '%s' as slot details for '%s'",
+                            key, res_name,
+                        )
+                        break
+
+            if len(details) != len(time_slots):
+                continue
+
+            for i, ts in enumerate(time_slots):
+                detail = details[i]
+
+                # Determine availability from detail
+                if isinstance(detail, dict):
+                    # ActiveNet uses status: 0=available, non-zero=booked
+                    status = detail.get("status")
+                    if status is not None:
+                        is_avail = (status == 0)
+                    else:
+                        # Fallback to boolean fields
+                        is_avail = detail.get("available",
+                                    detail.get("isAvailable", False))
+                elif isinstance(detail, (int, float)):
+                    is_avail = (detail == 0)
+                elif isinstance(detail, bool):
+                    is_avail = detail
+                else:
+                    continue
+
+                if not is_avail:
+                    continue
+
+                # Parse time: "06:00:00" → "06:00"
+                time_str = str(ts)
+                parts = time_str.split(":")
+                if len(parts) == 3:
+                    time_str = f"{parts[0]}:{parts[1]}"
+
+                slots.append({
+                    "date": current_date.isoformat(),
+                    "time": time_str,
+                    "court_name": res_name,
+                    "day_of_week": current_date.strftime("%A"),
+                    "duration_minutes": time_increment,
+                    "raw": {"source": "availability_grid"},
+                })
+
+        logger.info(
+            "Availability grid: parsed %d available slots from %d resources "
+            "(total cells=%d)",
+            len(slots), len(resources), len(resources) * len(time_slots),
+        )
+
+        # Per-resource slot summary for diagnostics
+        resource_summary: dict[str, int] = {}
+        for slot in slots:
+            name = slot["court_name"]
+            resource_summary[name] = resource_summary.get(name, 0) + 1
+        if resource_summary:
+            logger.info("Availability grid per-resource: %s", resource_summary)
 
         return slots
 

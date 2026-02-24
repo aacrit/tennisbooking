@@ -8,6 +8,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <link rel="manifest" href="manifest.json">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#127934;</text></svg>">
     <title>McFetridge Tennis</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -69,26 +70,6 @@
         <!-- Slot Changes -->
         <div id="changes-container"></div>
 
-        <!-- Non-Tennis Court Availability (collapsible) -->
-        <details class="other-availability" id="other-section">
-            <summary class="other-heading">
-                <span>Other McFetridge Activities</span>
-                <span class="other-count" id="other-count">0</span>
-                <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="6 9 12 15 18 9"></polyline>
-                </svg>
-            </summary>
-            <div class="calendar-scroll">
-                <div class="calendar-grid" id="other-calendar-grid">
-                    <div class="empty-hero">
-                        <div class="empty-icon">&#127935;</div>
-                        <div class="empty-title">No non-tennis slots</div>
-                        <div class="empty-body">No pickleball, ball machine, or other court availability found.</div>
-                    </div>
-                </div>
-            </div>
-        </details>
-
         <!-- Footer -->
         <div class="page-footer">
             <span>McFetridge Sports Center</span>
@@ -102,7 +83,7 @@
 
     <script>
     (function() {
-        var BOOKING_URL = 'https://anc.apm.activecommunities.com/chicagoparkdistrict/reservation/landing/quick?groupId=2&locale=en-US';
+        var BOOKING_URL = 'https://anc.apm.activecommunities.com/chicagoparkdistrict/reservation?onlineSiteId=0&from_original_cui=true&locale=en-US';
         var DAY_FULL = { Mon:'Monday', Tue:'Tuesday', Wed:'Wednesday', Thu:'Thursday', Fri:'Friday', Sat:'Saturday', Sun:'Sunday' };
         var REFRESH_INTERVAL = 5 * 60; // seconds
         var countdown = REFRESH_INTERVAL;
@@ -127,9 +108,6 @@
                 renderCount(data.total_slots || 0);
                 renderStatus(data);
                 renderChanges(data.changes || {});
-                renderOtherCalendar(data.other_calendar || []);
-                renderOtherCount(data.other_total_slots || 0);
-                autoExpandOther(data.total_slots || 0, data.other_total_slots || 0);
                 checkForegroundNotifications(data);
             } catch (e) {
                 console.error('Failed to load status:', e);
@@ -167,7 +145,8 @@
                         var court = s.court_name ? '<span class="slot-court">' + esc(s.court_name) + '</span>' : '';
                         var slotKey = day.date + '|' + s.slot_time + '|' + (s.court_name || '');
                         var newBadge = (!prevVisitSlots.has(slotKey)) ? '<span class="slot-new">NEW</span>' : '';
-                        return '<a class="slot-chip" href="' + BOOKING_URL + '" target="_blank" rel="noopener">' +
+                        var primeClass = s.is_prime_time ? 'slot-prime' : 'slot-offpeak';
+                        return '<a class="slot-chip ' + primeClass + '" href="' + BOOKING_URL + '" target="_blank" rel="noopener">' +
                             '<span class="slot-time">' + esc(s.slot_time) + '</span>' + court + newBadge +
                             '<svg class="slot-arrow" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>' +
                         '</a>';
@@ -255,71 +234,6 @@
 
             html += '</div>';
             container.innerHTML = html;
-        }
-
-        // ── Other (Non-Tennis) Calendar ──
-        function renderOtherCalendar(calendar) {
-            var grid = document.getElementById('other-calendar-grid');
-            if (!grid) return;
-            var totalSlots = 0;
-            calendar.forEach(function(d) { totalSlots += (d.slots ? d.slots.length : 0); });
-
-            if (!calendar.length || totalSlots === 0) {
-                grid.innerHTML =
-                    '<div class="empty-hero">' +
-                        '<div class="empty-icon">&#127935;</div>' +
-                        '<div class="empty-title">No non-tennis slots</div>' +
-                        '<div class="empty-body">No pickleball, ball machine, or other court availability found.</div>' +
-                    '</div>';
-                return;
-            }
-
-            grid.innerHTML = calendar.map(function(day, i) {
-                var emptyClass = (!day.slots || day.slots.length === 0) ? ' day-empty' : '';
-                var hasSlots = day.slots && day.slots.length > 0;
-
-                var tag = '';
-                if (i === 0) {
-                    tag = '<span class="day-tag">Tomorrow</span>';
-                }
-
-                var countBadge = hasSlots ? '<span class="day-count other-badge">' + day.slots.length + '</span>' : '';
-
-                var slotsHtml;
-                if (hasSlots) {
-                    slotsHtml = day.slots.map(function(s) {
-                        var court = s.court_name ? '<span class="slot-court">' + esc(s.court_name) + '</span>' : '';
-                        return '<div class="slot-chip other-slot-chip">' +
-                            '<span class="slot-time">' + esc(s.slot_time) + '</span>' + court +
-                        '</div>';
-                    }).join('');
-                } else {
-                    slotsHtml = '<div class="no-slots">No availability</div>';
-                }
-
-                return '<div class="day-card other-day' + emptyClass + '">' +
-                    '<div class="day-header">' +
-                        '<span class="day-name">' + esc(day.day_name) + '</span>' +
-                        '<span class="day-date">' + esc(day.date_display) + '</span>' +
-                        countBadge + tag +
-                    '</div>' +
-                    '<div class="day-slots">' + slotsHtml + '</div>' +
-                '</div>';
-            }).join('');
-        }
-
-        function renderOtherCount(total) {
-            var el = document.getElementById('other-count');
-            if (el) el.textContent = total;
-        }
-
-        function autoExpandOther(tennisTotal, otherTotal) {
-            var section = document.getElementById('other-section');
-            if (!section) return;
-            // Auto-expand when tennis has no slots but other activities do
-            if (tennisTotal === 0 && otherTotal > 0) {
-                section.open = true;
-            }
         }
 
         // ── Countdown Timer ──

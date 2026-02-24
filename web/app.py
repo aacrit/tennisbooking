@@ -10,7 +10,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import db
-from scraper.parser import ALLOWED_COURTS_RE
+from config import Settings
+
+_settings = Settings()
 
 WEB_DIR = Path(__file__).parent
 app = FastAPI(title="Tennis Court Monitor")
@@ -24,6 +26,19 @@ _run_check_fn = None
 def set_check_fn(fn):
     global _run_check_fn
     _run_check_fn = fn
+
+
+def _is_prime_time(slot_time_str: str, slot_date_str: str) -> bool:
+    """Check if a slot is prime time (weekend or weekday >= 6PM)."""
+    try:
+        d = datetime.strptime(slot_date_str, "%Y-%m-%d").date()
+        if d.weekday() >= 5:  # Weekend
+            return True
+        # Parse 12-hour time like "06:00 PM"
+        t = datetime.strptime(slot_time_str.strip(), "%I:%M %p").time()
+        return t.hour >= _settings.weekday_earliest_hour
+    except (ValueError, AttributeError):
+        return False
 
 
 def _build_calendar(grouped_slots: dict) -> list[dict]:
@@ -53,29 +68,20 @@ async def dashboard(request: Request):
     slot_events = await db.get_slot_events(limit=20)
     last_scan = recent_scans[0] if recent_scans else None
 
-    # Split slots into tennis vs non-tennis
-    tennis_grouped = {}
-    other_grouped = {}
+    # Group slots by date, enriching with prime-time flag for color coding
+    grouped = {}
     for slot in current_slots:
-        name = slot.get("court_name", "")
-        if ALLOWED_COURTS_RE.search(name):
-            tennis_grouped.setdefault(slot["slot_date"], []).append(slot)
-        elif name:
-            other_grouped.setdefault(slot["slot_date"], []).append(slot)
+        slot["is_prime_time"] = _is_prime_time(slot["slot_time"], slot["slot_date"])
+        grouped.setdefault(slot["slot_date"], []).append(slot)
 
-    calendar = _build_calendar(tennis_grouped)
+    calendar = _build_calendar(grouped)
     total_slots = sum(len(day["slots"]) for day in calendar)
-
-    other_calendar = _build_calendar(other_grouped)
-    other_total_slots = sum(len(day["slots"]) for day in other_calendar)
 
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "last_scan": last_scan,
         "calendar": calendar,
         "total_slots": total_slots,
-        "other_calendar": other_calendar,
-        "other_total_slots": other_total_slots,
         "recent_scans": recent_scans,
         "notifications": notifications,
         "slot_events": slot_events,
@@ -88,18 +94,13 @@ async def api_status():
     slots = await db.get_current_availability()
     last = scans[0] if scans else None
 
-    # Split slots into tennis vs non-tennis
-    tennis_grouped = {}
-    other_grouped = {}
+    # Group slots by date, enriching with prime-time flag for color coding
+    grouped = {}
     for slot in slots:
-        name = slot.get("court_name", "")
-        if ALLOWED_COURTS_RE.search(name):
-            tennis_grouped.setdefault(slot["slot_date"], []).append(slot)
-        elif name:
-            other_grouped.setdefault(slot["slot_date"], []).append(slot)
+        slot["is_prime_time"] = _is_prime_time(slot["slot_time"], slot["slot_date"])
+        grouped.setdefault(slot["slot_date"], []).append(slot)
 
-    calendar = _build_calendar(tennis_grouped)
-    other_calendar = _build_calendar(other_grouped)
+    calendar = _build_calendar(grouped)
 
     def _calendar_json(cal):
         return [
@@ -109,7 +110,11 @@ async def api_status():
                 "day_name": day["day_name"],
                 "is_weekend": day["is_weekend"],
                 "slots": [
-                    {"slot_time": s["slot_time"], "court_name": s.get("court_name", "")}
+                    {
+                        "slot_time": s["slot_time"],
+                        "court_name": s.get("court_name", ""),
+                        "is_prime_time": s.get("is_prime_time", False),
+                    }
                     for s in day["slots"]
                 ],
             }
@@ -122,8 +127,6 @@ async def api_status():
         "slots_found": last["slots_found"] if last else 0,
         "calendar": _calendar_json(calendar),
         "total_slots": sum(len(d["slots"]) for d in calendar),
-        "other_calendar": _calendar_json(other_calendar),
-        "other_total_slots": sum(len(d["slots"]) for d in other_calendar),
     }
 
 

@@ -2,24 +2,36 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # ActiveNet booking portal
+    # ActiveNet booking portal (facility reservation page)
     booking_url: str = (
         "https://anc.apm.activecommunities.com/chicagoparkdistrict/"
-        "reservation/landing/quick?groupId=2&locale=en-US"
+        "reservation?onlineSiteId=0&from_original_cui=true&locale=en-US"
     )
+
+    # ActiveNet authentication (required for real court availability)
+    # Anonymous users see courts as unavailable; logging in reveals real data.
+    activenet_username: str = ""
+    activenet_password: str = ""
 
     # Scanning schedule (CT timezone)
     peak_interval_minutes: int = 5      # 6:50 AM - 8:00 AM CT
     normal_interval_minutes: int = 45   # 8:00 AM - 11:59 PM CT
     peak_start_hour: int = 6            # CT
     peak_end_hour: int = 8              # CT
-    quiet_start_hour: int = 0           # No scans midnight-6AM
+    quiet_start_hour: int = 0           # Overnight scans midnight-6AM (hourly)
     quiet_end_hour: int = 6
 
     # WhatsApp notifications via Green API
     green_api_instance_id: str = ""
     green_api_token: str = ""
     whatsapp_chat_id: str = ""
+
+    @property
+    def whatsapp_chat_ids(self) -> list[str]:
+        """Parse comma-separated chat IDs into a list."""
+        if not self.whatsapp_chat_id:
+            return []
+        return [cid.strip() for cid in self.whatsapp_chat_id.split(",") if cid.strip()]
 
     # API polling (lightweight HTTP checks between Playwright scans)
     api_poll_enabled: bool = True

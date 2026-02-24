@@ -17,7 +17,7 @@ import pytz
 
 from config import Settings
 from scraper.checker import AvailabilityChecker
-from scraper.parser import filter_slots, filter_other_slots
+from scraper.parser import filter_slots
 
 logging.basicConfig(
     level=logging.DEBUG if os.environ.get("SCRAPER_DEBUG") else logging.INFO,
@@ -31,6 +31,18 @@ OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "data
 OUT_PATH = os.path.join(OUT_DIR, "status.json")
 
 
+def _is_prime_time_str(time_str: str, date_str: str, settings: Settings) -> bool:
+    """Check if a slot is prime time from string representations."""
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d").date()
+        if d.weekday() >= 5:
+            return True
+        t = datetime.strptime(time_str.strip(), "%I:%M %p").time()
+        return t.hour >= settings.weekday_earliest_hour
+    except (ValueError, AttributeError):
+        return False
+
+
 def build_calendar(filtered_slots: list[dict]) -> list[dict]:
     """Build 6-day calendar from filtered slots (mirrors web/app.py _build_calendar)."""
     today = date.today()
@@ -42,14 +54,19 @@ def build_calendar(filtered_slots: list[dict]) -> list[dict]:
     for i in range(1, 7):
         d = today + timedelta(days=i)
         d_str = d.isoformat()
+        is_weekend = d.weekday() >= 5
         day_slots = grouped.get(d_str, [])
         calendar.append({
             "date": d_str,
             "date_display": d.strftime("%b %d"),
             "day_name": d.strftime("%a"),
-            "is_weekend": d.weekday() >= 5,
+            "is_weekend": is_weekend,
             "slots": [
-                {"slot_time": s["time"], "court_name": s.get("court_name", "")}
+                {
+                    "slot_time": s["time"],
+                    "court_name": s.get("court_name", ""),
+                    "is_prime_time": s.get("is_prime_time", is_weekend),
+                }
                 for s in day_slots
             ],
         })
@@ -127,8 +144,6 @@ async def main():
             "calendar": calendar,
             "total_slots": 0,
             "changes": compute_changes(old_status, calendar, now_ct),
-            "other_calendar": build_calendar([]),
-            "other_total_slots": 0,
         })
         # Don't sys.exit(1) — let the workflow commit the failure status
         # so the dashboard shows when the last attempt was made
@@ -139,11 +154,6 @@ async def main():
     total_slots = sum(len(day["slots"]) for day in calendar)
     changes = compute_changes(old_status, calendar, now_ct)
 
-    # Non-tennis slots (pickleball, ball machines, etc.)
-    other_filtered = filter_other_slots(raw_slots, settings)
-    other_calendar = build_calendar(other_filtered)
-    other_total_slots = sum(len(day["slots"]) for day in other_calendar)
-
     write_json({
         "last_scan_time": now_ct,
         "last_scan_success": True,
@@ -151,25 +161,32 @@ async def main():
         "calendar": calendar,
         "total_slots": total_slots,
         "changes": changes,
-        "other_calendar": other_calendar,
-        "other_total_slots": other_total_slots,
     })
 
     # Send WhatsApp notification for newly opened slots
     instance_id = os.environ.get("GREEN_API_INSTANCE_ID", "")
     api_token = os.environ.get("GREEN_API_TOKEN", "")
-    chat_id = os.environ.get("WHATSAPP_CHAT_ID", "")
-    wa_configured = bool(instance_id and api_token and chat_id)
+    chat_ids_raw = os.environ.get("WHATSAPP_CHAT_ID", "")
+    chat_ids = [cid.strip() for cid in chat_ids_raw.split(",") if cid.strip()]
+    wa_configured = bool(instance_id and api_token and chat_ids)
 
     opened = changes.get("opened", [])
-    if opened:
+    # Only notify for prime-time slots (weekday 6PM+ or weekends)
+    prime_opened = [
+        s for s in opened
+        if _is_prime_time_str(s.get("time", ""), s.get("date", ""), settings)
+    ]
+    if prime_opened:
         if wa_configured:
             from notifications.whatsapp import send_whatsapp, format_slots_message
-            msg = format_slots_message(opened)
-            ok = send_whatsapp(instance_id, api_token, chat_id, msg)
-            logger.info("WhatsApp sent=%s for %d opened slots", ok, len(opened))
+            msg = format_slots_message(prime_opened)
+            for chat_id in chat_ids:
+                ok = send_whatsapp(instance_id, api_token, chat_id, msg)
+                logger.info("WhatsApp sent=%s to %s for %d prime-time opened slots (of %d total)", ok, chat_id, len(prime_opened), len(opened))
         else:
-            logger.warning("WhatsApp NOT configured — skipping notification for %d opened slots", len(opened))
+            logger.warning("WhatsApp NOT configured — skipping notification for %d prime-time opened slots", len(prime_opened))
+    elif opened:
+        logger.info("Skipping WhatsApp: %d opened slots are off-peak only", len(opened))
 
     opened_count = len(changes.get("opened", []))
     closed_count = len(changes.get("closed", []))
@@ -197,9 +214,10 @@ def send_test_whatsapp():
 
     instance_id = os.environ.get("GREEN_API_INSTANCE_ID", "")
     api_token = os.environ.get("GREEN_API_TOKEN", "")
-    chat_id = os.environ.get("WHATSAPP_CHAT_ID", "")
+    chat_ids_raw = os.environ.get("WHATSAPP_CHAT_ID", "")
+    chat_ids = [cid.strip() for cid in chat_ids_raw.split(",") if cid.strip()]
 
-    if not all([instance_id, api_token, chat_id]):
+    if not all([instance_id, api_token, chat_ids]):
         logger.error(
             "Cannot send test: missing GREEN_API_INSTANCE_ID, GREEN_API_TOKEN, "
             "or WHATSAPP_CHAT_ID environment variables"
@@ -214,13 +232,14 @@ def send_test_whatsapp():
     ]
 
     msg = format_slots_message(mock_slots)
-    logger.info("Sending test WhatsApp message to %s...", chat_id)
-    ok = send_whatsapp(instance_id, api_token, chat_id, msg)
-    if ok:
-        logger.info("Test message sent successfully!")
-    else:
-        logger.error("Test message FAILED — check credentials and logs above")
-        sys.exit(1)
+    for chat_id in chat_ids:
+        logger.info("Sending test WhatsApp message to %s...", chat_id)
+        ok = send_whatsapp(instance_id, api_token, chat_id, msg)
+        if ok:
+            logger.info("Test message sent to %s successfully!", chat_id)
+        else:
+            logger.error("Test message to %s FAILED — check credentials and logs above", chat_id)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

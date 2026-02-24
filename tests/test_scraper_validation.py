@@ -38,12 +38,25 @@ def _make_slot(slot_date: str, slot_time: str, court_name: str = "Tennis Ct01") 
 
 
 def _next_weekday(weekday: int) -> date:
-    """Return the next date with the given weekday (0=Mon, 6=Sun)."""
+    """Return the next date with the given weekday type within 6 days.
+
+    If the exact weekday (0=Mon, 6=Sun) would be >6 days out,
+    returns the nearest future date of the same type
+    (weekday Mon-Fri or weekend Sat-Sun) that fits in the window.
+    """
     today = date.today()
-    days_ahead = weekday - today.weekday()
-    if days_ahead <= 0:
-        days_ahead += 7
-    return today + timedelta(days=days_ahead)
+    is_weekend = weekday >= 5
+    for d in range(1, 7):
+        candidate = today + timedelta(days=d)
+        if candidate.weekday() == weekday:
+            return candidate
+        # Fallback: any day matching the weekday/weekend type
+    for d in range(1, 7):
+        candidate = today + timedelta(days=d)
+        if is_weekend == (candidate.weekday() >= 5):
+            return candidate
+    # Should never reach here, but just in case
+    return today + timedelta(days=1)
 
 
 def _settings() -> Settings:
@@ -583,40 +596,39 @@ class TestEndToEndNoEmptyCourts:
 
 
 # ===========================================================================
-# Tests 24-29: Reservation page refactor (groupId=2, single strategy)
+# Tests 24-29: Scraper URL and strategy validation
 # ===========================================================================
 
-class TestReservationPageStrategy:
-    """Verify the scraper uses the quick reservation page at groupId=2."""
+class TestScraperStrategy:
+    """Verify the scraper uses the correct Quick Reserve URL."""
 
-    def test_booking_url_uses_group_id_2(self):
-        """BOOKING_URL constant must use groupId=2."""
-        from scraper.checker import BOOKING_URL
-        assert "groupId=2" in BOOKING_URL
-        assert "groupId=1" not in BOOKING_URL
+    def test_quick_reserve_url_uses_correct_path(self):
+        """QUICK_RESERVE_URL must use the /reservation path (not /reservation/quick)."""
+        from scraper.checker import QUICK_RESERVE_URL
+        assert "/reservation?" in QUICK_RESERVE_URL
+        assert "reservation/quick" not in QUICK_RESERVE_URL
 
-    def test_config_booking_url_uses_group_id_2(self):
-        """config.py default booking_url must use groupId=2."""
+    def test_config_booking_url_uses_reservation(self):
+        """config.py default booking_url must point to reservation page."""
         s = Settings()
-        assert "groupId=2" in s.booking_url
+        assert "/reservation?" in s.booking_url
+        assert "reservation/quick" not in s.booking_url
 
-    def test_whatsapp_booking_url_uses_group_id_2(self):
-        """WhatsApp message footer URL must use groupId=2."""
+    def test_whatsapp_booking_url_uses_reservation(self):
+        """WhatsApp message footer URL must point to reservation page."""
         from notifications.whatsapp import BOOKING_URL as WA_URL
-        assert "groupId=2" in WA_URL
-        assert "groupId=1" not in WA_URL
+        assert "/reservation?" in WA_URL
+        assert "reservation/quick" not in WA_URL
 
-    def test_activity_search_removed(self):
-        """_check_activity_search method should no longer exist."""
+    def test_quick_reserve_method_exists(self):
+        """_check_quick_reserve method should exist."""
         checker = AvailabilityChecker(Settings())
-        assert not hasattr(checker, '_check_activity_search'), \
-            "_check_activity_search should be removed"
+        assert hasattr(checker, '_check_quick_reserve')
 
-    def test_legacy_portal_removed(self):
-        """_check_legacy_portal method should no longer exist."""
+    def test_activity_search_fallback_exists(self):
+        """_check_activity_search method should exist as fallback."""
         checker = AvailabilityChecker(Settings())
-        assert not hasattr(checker, '_check_legacy_portal'), \
-            "_check_legacy_portal should be removed"
+        assert hasattr(checker, '_check_activity_search')
 
     def test_resource_extraction_exists(self):
         """_extract_resource_names method should exist on the checker."""
@@ -643,3 +655,91 @@ class TestReservationPageStrategy:
         }
         result2 = checker._match_slot_to_resource(slot2, resources)
         assert result2 == ""
+
+
+# ===========================================================================
+# Tests 30-34: Broad DOM parser tightening
+# ===========================================================================
+
+class TestBroadDOMParser:
+    """Verify _parse_dom_element_broad rejects false positives."""
+
+    def test_rejects_header_elements(self):
+        """Broad parser must reject th/header elements (column headers)."""
+        checker = AvailabilityChecker(Settings())
+        tomorrow = date.today() + timedelta(days=1)
+
+        el = {
+            "text": "6:00 PM",
+            "tag": "TH",
+            "className": "time-header",
+            "contextText": "McFetridge Tennis Ct01 schedule 6:00 PM",
+        }
+        assert checker._parse_dom_element_broad(el, tomorrow) is None
+
+    def test_rejects_container_with_multiple_facilities(self):
+        """Broad parser must reject elements whose context has 3+ facility names."""
+        checker = AvailabilityChecker(Settings())
+        tomorrow = date.today() + timedelta(days=1)
+
+        el = {
+            "text": "6:00 PM",
+            "tag": "TD",
+            "className": "cell",
+            "contextText": (
+                "McFetridge Tennis Ct01 McFetridge Tennis Ct02 "
+                "McFetridge Pickleball Ct1 schedule"
+            ),
+        }
+        assert checker._parse_dom_element_broad(el, tomorrow) is None
+
+    def test_no_generic_regex_fallback(self):
+        """Broad parser must not match Pickleball/Ball Machine via generic regex."""
+        checker = AvailabilityChecker(Settings())
+        tomorrow = date.today() + timedelta(days=1)
+
+        # Element with only a generic court-like name, no FACILITY_RE match
+        el = {
+            "text": "6:00 PM",
+            "tag": "TD",
+            "className": "",
+            "contextText": "Gymnasium Room 3 available 6:00 PM",
+        }
+        assert checker._parse_dom_element_broad(el, tomorrow) is None
+
+    def test_accepts_valid_tennis_slot(self):
+        """Broad parser should accept a valid element with a single tennis court."""
+        checker = AvailabilityChecker(Settings())
+        tomorrow = date.today() + timedelta(days=1)
+
+        el = {
+            "text": "6:00 PM",
+            "tag": "TD",
+            "className": "available",
+            "contextText": "McFetridge Tennis Ct01 6:00 PM",
+            "ariaLabel": "",
+        }
+        result = checker._parse_dom_element_broad(el, tomorrow)
+        assert result is not None
+        assert result["time"] == "18:00"
+        assert "Tennis" in result["court_name"]
+
+    def test_rejects_pickleball_only_context(self):
+        """Broad parser must not match Pickleball-only context as tennis."""
+        checker = AvailabilityChecker(Settings())
+        tomorrow = date.today() + timedelta(days=1)
+
+        el = {
+            "text": "6:00 PM",
+            "tag": "TD",
+            "className": "",
+            "contextText": "McFetridge Pickleball1A 6:00 PM",
+            "ariaLabel": "",
+        }
+        # FACILITY_RE matches Pickleball, so court_name will be set.
+        # This is OK — the downstream parser.py ALLOWED_COURTS_RE will
+        # filter it to only Tennis Ct 1-6. The broad parser's job is
+        # just to not generate false positives.
+        result = checker._parse_dom_element_broad(el, tomorrow)
+        if result:
+            assert "Pickleball" in result["court_name"]

@@ -20,7 +20,7 @@ from config import Settings
 from notifications.whatsapp import send_whatsapp, format_slots_message
 from scraper.checker import AvailabilityChecker
 from scraper.api_poller import APIPoller
-from scraper.parser import filter_slots, filter_other_slots
+from scraper.parser import filter_slots
 from web.app import app, set_check_fn
 
 # Logging
@@ -61,22 +61,17 @@ async def run_full_scan() -> int:
         logger.info("Starting full Playwright scan...")
 
         try:
-            checker = AvailabilityChecker(settings)
-            # Timeout after 3 minutes to prevent Playwright hangs
+            checker = AvailabilityChecker(settings, diag_dir="data/diag")
+            # Timeout after 5 minutes to allow login + 7 date scans
             raw_slots = await asyncio.wait_for(
-                checker.check_availability(), timeout=180
+                checker.check_availability(), timeout=300
             )
             filtered = filter_slots(raw_slots, settings)
             duration = _time.time() - start
 
-            # Also filter non-tennis slots (pickleball, ball machines, etc.)
-            other_filtered = filter_other_slots(raw_slots, settings)
-
             scan_id = await db.record_scan(True, None, len(filtered), duration)
             if filtered:
                 await db.save_slots(scan_id, filtered)
-            if other_filtered:
-                await db.save_slots(scan_id, other_filtered)
 
             # Change detection via current_slots table (tennis only)
             current_set = {
@@ -87,9 +82,14 @@ async def run_full_scan() -> int:
                 current_set, scan_id, "playwright"
             )
 
-            # Notify on newly opened slots
-            if opened:
-                await _notify_opened_slots(opened)
+            # Notify only on prime-time slots (weekday 6PM+ or weekends)
+            prime_time_set = {
+                (s["date"], s["time"], s.get("court_name", ""))
+                for s in filtered if s.get("is_prime_time")
+            }
+            prime_opened = opened & prime_time_set
+            if prime_opened:
+                await _notify_opened_slots(prime_opened)
 
             # Refresh API context for the lightweight poller
             if settings.api_poll_enabled:
@@ -145,14 +145,11 @@ async def run_api_poll() -> int:
                 return 0
 
             filtered = filter_slots(raw_slots, settings)
-            other_filtered = filter_other_slots(raw_slots, settings)
             duration = _time.time() - start
 
             scan_id = await db.record_scan(True, None, len(filtered), duration)
             if filtered:
                 await db.save_slots(scan_id, filtered)
-            if other_filtered:
-                await db.save_slots(scan_id, other_filtered)
 
             current_set = {
                 (s["date"], s["time"], s.get("court_name", ""))
@@ -162,8 +159,14 @@ async def run_api_poll() -> int:
                 current_set, scan_id, "api_poll"
             )
 
-            if opened:
-                await _notify_opened_slots(opened)
+            # Notify only on prime-time slots (weekday 6PM+ or weekends)
+            prime_time_set = {
+                (s["date"], s["time"], s.get("court_name", ""))
+                for s in filtered if s.get("is_prime_time")
+            }
+            prime_opened = opened & prime_time_set
+            if prime_opened:
+                await _notify_opened_slots(prime_opened)
 
             if filtered or opened or closed:
                 logger.info(
@@ -203,14 +206,15 @@ async def _notify_opened_slots(opened: set[tuple]):
 
     instance_id = settings.green_api_instance_id
     api_token = settings.green_api_token
-    chat_id = settings.whatsapp_chat_id
+    chat_ids = settings.whatsapp_chat_ids
 
-    if instance_id and api_token and chat_id:
+    if instance_id and api_token and chat_ids:
         msg = format_slots_message(slots_to_notify)
-        success = send_whatsapp(instance_id, api_token, chat_id, msg)
-        await db.record_notification(
-            "whatsapp", chat_id, slots_to_notify, success,
-        )
+        for chat_id in chat_ids:
+            success = send_whatsapp(instance_id, api_token, chat_id, msg)
+            await db.record_notification(
+                "whatsapp", chat_id, slots_to_notify, success,
+            )
     else:
         logger.warning(
             "WhatsApp not configured (missing GREEN_API_INSTANCE_ID / "
@@ -251,22 +255,32 @@ def setup_scheduler() -> AsyncIOScheduler:
 
     # === PLAYWRIGHT FULL SCANS ===
 
-    # Peak: every 15 minutes from 6 AM to 8 AM CT
+    # Peak: every 5 minutes from 6 AM to 8 AM CT
     scheduler.add_job(
         run_full_scan,
-        CronTrigger(hour="6-7", minute="*/15", timezone=CT),
+        CronTrigger(hour="6-7", minute="*/5", timezone=CT),
         id="peak_full_scan",
-        name="Peak full scan (6-8 AM CT)",
+        name="Peak full scan (every 5 min, 6-8 AM CT)",
         replace_existing=True,
         misfire_grace_time=120,
     )
 
-    # Normal: every 30 minutes from 8 AM to midnight CT
+    # Normal: every 10 minutes from 8 AM to midnight CT
     scheduler.add_job(
         run_full_scan,
-        CronTrigger(hour="8-23", minute="0,30", timezone=CT),
+        CronTrigger(hour="8-23", minute="*/10", timezone=CT),
         id="normal_full_scan",
-        name="Normal full scan (8 AM - midnight CT)",
+        name="Normal full scan (every 10 min, 8 AM - midnight CT)",
+        replace_existing=True,
+        misfire_grace_time=120,
+    )
+
+    # Overnight: every hour from midnight to 6 AM CT
+    scheduler.add_job(
+        run_full_scan,
+        CronTrigger(hour="0-5", minute="0", timezone=CT),
+        id="overnight_full_scan",
+        name="Overnight full scan (every 1 hr, midnight-6 AM CT)",
         replace_existing=True,
         misfire_grace_time=120,
     )
@@ -336,12 +350,16 @@ async def lifespan(app):
     asyncio.create_task(_startup_scan())
 
     # Log WhatsApp configuration status
+    chat_ids = settings.whatsapp_chat_ids
     wa_configured = bool(
         settings.green_api_instance_id and
         settings.green_api_token and
-        settings.whatsapp_chat_id
+        chat_ids
     )
-    logger.info("WhatsApp notifications: %s", "CONFIGURED" if wa_configured else "NOT CONFIGURED")
+    logger.info(
+        "WhatsApp notifications: %s",
+        f"CONFIGURED ({len(chat_ids)} recipient{'s' if len(chat_ids) != 1 else ''})" if wa_configured else "NOT CONFIGURED",
+    )
 
     yield
 

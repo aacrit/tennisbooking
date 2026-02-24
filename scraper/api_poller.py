@@ -24,9 +24,16 @@ _SLOT_WRAPPER_KEYS = [
 def parse_api_response(data) -> list[dict]:
     """Parse an API JSON response into raw slot dicts.
 
-    Same logic as AvailabilityChecker._parse_captured_responses() but operates
-    on a single response body instead of the full captured list.
+    Handles two formats:
+    1. ActiveNet availability grid (body.availability.resources with timeSlotDetails)
+    2. Generic flat list of slot objects
     """
+    # Try ActiveNet availability grid format first
+    grid_slots = _parse_activenet_grid(data)
+    if grid_slots:
+        return grid_slots
+
+    # Generic flat list parsing
     slots = []
     items = []
 
@@ -64,6 +71,69 @@ def parse_api_response(data) -> list[dict]:
                 "day_of_week": "",
                 "duration_minutes": item.get("duration", 60),
                 "raw": item,
+            })
+
+    return slots
+
+
+def _parse_activenet_grid(data) -> list[dict]:
+    """Parse ActiveNet Quick Reserve availability grid response.
+
+    Expected structure: body.availability.resources[].time_slot_details[].status
+    where status=0 means available, status=1 means unavailable.
+    Handles both snake_case and camelCase field names.
+    """
+    if not isinstance(data, dict):
+        return []
+
+    body = data.get("body", data)
+    avail = body.get("availability") if isinstance(body, dict) else None
+    if not isinstance(avail, dict):
+        return []
+
+    time_slots = avail.get("time_slots") or avail.get("timeSlots") or []
+    resources = avail.get("resources", [])
+    if not time_slots or not resources:
+        return []
+
+    time_increment = avail.get("time_increment") or avail.get("timeIncrement") or 60
+    today = date.today()
+
+    slots = []
+    for res in resources:
+        if not isinstance(res, dict):
+            continue
+        res_name = str(
+            res.get("resourceName", "") or res.get("resource_name", "") or ""
+        ).strip()
+
+        details = res.get("timeSlotDetails") or res.get("time_slot_details") or []
+        if len(details) != len(time_slots):
+            continue
+
+        for i, ts in enumerate(time_slots):
+            detail = details[i]
+            if isinstance(detail, dict):
+                status = detail.get("status")
+                is_avail = (status == 0) if status is not None else False
+            else:
+                continue
+
+            if not is_avail:
+                continue
+
+            time_str = str(ts)
+            parts = time_str.split(":")
+            if len(parts) == 3:
+                time_str = f"{parts[0]}:{parts[1]}"
+
+            slots.append({
+                "date": (today + timedelta(days=1)).isoformat(),
+                "time": time_str,
+                "court_name": res_name,
+                "day_of_week": "",
+                "duration_minutes": time_increment,
+                "raw": {"source": "api_poller_grid"},
             })
 
     return slots

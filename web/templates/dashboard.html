@@ -11,7 +11,7 @@
             <div class="live-status">
                 {% if last_scan and last_scan.success %}
                     <span class="pulse-dot pulse-green"></span>
-                    <span class="status-text">{{ last_scan.scan_time }}</span>
+                    <span class="status-text">{{ last_scan.scan_time|to_ct }}</span>
                 {% elif last_scan %}
                     <span class="pulse-dot pulse-red"></span>
                     <span class="status-text">Scan failed</span>
@@ -106,7 +106,7 @@
             {% for scan in recent_scans %}
             <div class="feed-row">
                 <span class="feed-dot {{ 'feed-dot-ok' if scan.success else 'feed-dot-err' }}"></span>
-                <span class="feed-time">{{ scan.scan_time }}</span>
+                <span class="feed-time">{{ scan.scan_time|to_ct }}</span>
                 <span class="feed-meta">{{ scan.slots_found }} slot{{ 's' if scan.slots_found != 1 }}</span>
                 <span class="feed-meta">{{ "%.1f"|format(scan.duration_seconds or 0) }}s</span>
             </div>
@@ -168,7 +168,7 @@
                 <tbody>
                     {% for scan in scan_log %}
                     <tr class="{{ 'scan-row-err' if not scan.success }}">
-                        <td class="scan-time-col">{{ scan.scan_time }}</td>
+                        <td class="scan-time-col">{{ scan.scan_time|to_ct }}</td>
                         <td>
                             {% if scan.success %}
                                 <span class="scan-badge scan-badge-ok">OK</span>

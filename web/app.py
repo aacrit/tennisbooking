@@ -63,6 +63,7 @@ def _build_calendar(grouped_slots: dict) -> list[dict]:
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     recent_scans = await db.get_recent_scans(limit=5)
+    scan_log = await db.get_scan_log(limit=50)
     current_slots = await db.get_current_availability()
     notifications = await db.get_notification_history(limit=5)
     slot_events = await db.get_slot_events(limit=20)
@@ -85,6 +86,7 @@ async def dashboard(request: Request):
         "recent_scans": recent_scans,
         "notifications": notifications,
         "slot_events": slot_events,
+        "scan_log": scan_log,
     })
 
 

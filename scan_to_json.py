@@ -135,7 +135,7 @@ async def main():
         filtered = filter_slots(raw_slots, settings)
     except Exception as e:
         logger.exception("Scan failed: %s", e)
-        now_ct = datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CT")
+        now_ct = datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CST")
         calendar = build_calendar([])
         write_json({
             "last_scan_time": now_ct,
@@ -149,7 +149,7 @@ async def main():
         # so the dashboard shows when the last attempt was made
         return
 
-    now_ct = datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CT")
+    now_ct = datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CST")
     calendar = build_calendar(filtered)
     total_slots = sum(len(day["slots"]) for day in calendar)
     changes = compute_changes(old_status, calendar, now_ct)
@@ -226,9 +226,9 @@ def send_test_whatsapp():
 
     mock_slots = [
         {"date": "2026-02-25", "time": "6:00 PM", "court_name": "Tennis Ct 1",
-         "detected_at": datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CT")},
+         "detected_at": datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CST")},
         {"date": "2026-02-25", "time": "7:00 PM", "court_name": "Tennis Ct 3",
-         "detected_at": datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CT")},
+         "detected_at": datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CST")},
     ]
 
     msg = format_slots_message(mock_slots)

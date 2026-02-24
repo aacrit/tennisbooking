@@ -11,7 +11,7 @@
             <div class="live-status">
                 {% if last_scan and last_scan.success %}
                     <span class="pulse-dot pulse-green"></span>
-                    <span class="status-text">{{ last_scan.scan_time }}</span>
+                    <span class="status-text" data-utc="{{ last_scan.scan_time }}" title="{{ last_scan.scan_time | cst }} CST">{{ last_scan.scan_time | cst }} CST</span>
                 {% elif last_scan %}
                     <span class="pulse-dot pulse-red"></span>
                     <span class="status-text">Scan failed</span>
@@ -52,7 +52,7 @@
             <div class="empty-hero">
                 <div class="empty-icon">&#127934;</div>
                 <div class="empty-title">No courts available</div>
-                <div class="empty-body">All courts are fully booked for the next 6 days. New slots open at 7 AM CT daily.</div>
+                <div class="empty-body">All courts are fully booked for the next 6 days. New slots open at 7 AM CST daily.</div>
             </div>
         {% else %}
             {% for day in calendar %}
@@ -104,7 +104,7 @@
             <table class="scan-log-table">
                 <thead>
                     <tr>
-                        <th>Time</th>
+                        <th>Time (CST)</th>
                         <th class="num">Slots</th>
                         <th class="num">Opened</th>
                         <th class="num">Closed</th>
@@ -115,7 +115,7 @@
                 <tbody>
                     {% for scan in scan_log %}
                     <tr class="{{ 'scan-row-err' if not scan.success }}">
-                        <td class="scan-time-col {{ 'scan-time-ok' if scan.success else 'scan-time-err' }}"{% if not scan.success and scan.error_message %} title="{{ scan.error_message }}"{% endif %}>{{ scan.scan_time }}</td>
+                        <td class="scan-time-col {{ 'scan-time-ok' if scan.success else 'scan-time-err' }}"{% if not scan.success and scan.error_message %} title="{{ scan.error_message }}"{% endif %}>{{ scan.scan_time | cst }}</td>
                         <td class="num">{{ scan.slots_found }}</td>
                         <td class="num">
                             {% if scan.slots_opened > 0 %}
@@ -172,6 +172,48 @@
     var BOOKING_URL = 'https://anc.apm.activecommunities.com/chicagoparkdistrict/reservation?onlineSiteId=0&from_original_cui=true&locale=en-US';
     var DAY_FULL = { Mon:'Monday', Tue:'Tuesday', Wed:'Wednesday', Thu:'Thursday', Fri:'Friday', Sat:'Saturday', Sun:'Sunday' };
 
+    function timeAgo(utcStr) {
+        if (!utcStr) return '';
+        var d = new Date(utcStr.replace(' ', 'T') + 'Z');
+        if (isNaN(d.getTime())) return utcStr;
+        var diff = Math.floor((Date.now() - d.getTime()) / 60000);
+        if (diff < 0 || diff < 1) return 'just now';
+        if (diff < 60) return diff + 'm ago';
+        if (diff < 1440) return Math.floor(diff / 60) + 'h ago';
+        return Math.floor(diff / 1440) + 'd ago';
+    }
+
+    function formatCST(utcStr) {
+        if (!utcStr) return '';
+        try {
+            var d = new Date(utcStr.replace(' ', 'T') + 'Z');
+            if (isNaN(d.getTime())) return utcStr;
+            return d.toLocaleString('en-US', {
+                timeZone: 'America/Chicago',
+                month: 'short', day: 'numeric',
+                hour: 'numeric', minute: '2-digit',
+                hour12: true
+            }) + ' CST';
+        } catch(e) { return utcStr; }
+    }
+
+    // Convert topbar to relative time on load
+    (function() {
+        var el = document.querySelector('.status-text[data-utc]');
+        if (el && el.dataset.utc) {
+            el.textContent = timeAgo(el.dataset.utc);
+            el.title = formatCST(el.dataset.utc);
+        }
+    })();
+
+    // Update relative time every 30s + keep topbar fresh
+    setInterval(function() {
+        var el = document.querySelector('.status-text[data-utc]');
+        if (el && el.dataset.utc) {
+            el.textContent = timeAgo(el.dataset.utc);
+        }
+    }, 30000);
+
     // In-place refresh every 30 seconds
     setInterval(refreshStatus, 30000);
 
@@ -198,7 +240,7 @@
                 '<div class="empty-hero">' +
                     '<div class="empty-icon">&#127934;</div>' +
                     '<div class="empty-title">No courts available</div>' +
-                    '<div class="empty-body">All courts are fully booked for the next 6 days. New slots open at 7 AM CT daily.</div>' +
+                    '<div class="empty-body">All courts are fully booked for the next 6 days. New slots open at 7 AM CST daily.</div>' +
                 '</div>';
             return;
         }
@@ -259,7 +301,10 @@
         if (!dot || !text) return;
         if (data.last_scan_success) {
             dot.className = 'pulse-dot pulse-green';
-            text.textContent = data.last_scan_time;
+            var utc = data.last_scan_time_utc || '';
+            text.textContent = timeAgo(utc);
+            text.title = formatCST(utc);
+            text.dataset.utc = utc;
         } else if (data.last_scan_time) {
             dot.className = 'pulse-dot pulse-red';
             text.textContent = 'Scan failed';

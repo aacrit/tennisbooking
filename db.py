@@ -255,12 +255,14 @@ async def get_scan_log(limit: int = 50) -> list[dict]:
                 sr.duration_seconds,
                 COALESCE(SUM(CASE WHEN se.event_type = 'opened' THEN 1 ELSE 0 END), 0) AS slots_opened,
                 COALESCE(SUM(CASE WHEN se.event_type = 'closed' THEN 1 ELSE 0 END), 0) AS slots_closed,
-                (SELECT se2.scan_method FROM slot_events se2
-                 WHERE se2.scan_id = sr.id LIMIT 1) AS scan_method,
                 (SELECT COUNT(*) FROM notifications n
                  WHERE n.sent_time BETWEEN sr.scan_time
                  AND datetime(sr.scan_time, '+30 seconds')
-                 AND n.success = 1) AS notifications_sent
+                 AND n.success = 1) AS notifications_sent,
+                (SELECT GROUP_CONCAT(DISTINCT se3.court_name)
+                 FROM slot_events se3
+                 WHERE se3.scan_id = sr.id
+                   AND se3.event_type = 'opened') AS opened_courts
             FROM scan_results sr
             LEFT JOIN slot_events se ON se.scan_id = sr.id
             GROUP BY sr.id

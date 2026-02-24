@@ -325,6 +325,49 @@ details[open] > .feed-heading .chevron { transform: rotate(180deg); }
 .feed-meta + .feed-meta { margin-left: 0; }
 .feed-empty { font-size: 12px; color: var(--text-3); padding: 8px; }
 
+/* ───── Scan Log Table ───── */
+.scan-log { padding: 0 0 8px; }
+.scan-log-wrap {
+    overflow-x: auto; -webkit-overflow-scrolling: touch; padding: 0 4px 8px;
+}
+.scan-log-table {
+    width: 100%; border-collapse: collapse;
+    font-size: 12px; font-variant-numeric: tabular-nums;
+}
+.scan-log-table th {
+    text-align: left; font-size: 10px; font-weight: 500;
+    color: var(--text-3); text-transform: uppercase; letter-spacing: 0.05em;
+    padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap;
+    position: sticky; top: 0; background: var(--bg);
+}
+.scan-log-table th.num, .scan-log-table td.num { text-align: right; }
+.scan-log-table td {
+    padding: 5px 8px; color: var(--text-1); white-space: nowrap;
+    border-bottom: 1px solid var(--border);
+}
+.scan-log-table tbody tr { transition: background 0.1s var(--ease); }
+.scan-log-table tbody tr:hover { background: var(--surface-hover); }
+.scan-row-err { background: var(--red-bg); }
+.scan-time-col { color: var(--text-2); }
+
+.scan-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 1px 6px; border-radius: 4px;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.02em;
+}
+.scan-badge-ok { color: var(--green); background: var(--green-bg); }
+.scan-badge-err { color: var(--red); background: var(--red-bg); cursor: help; }
+.scan-badge-pw { color: var(--text-2); background: var(--surface-hover); border: 1px solid var(--border); }
+.scan-badge-api { color: var(--blue); background: var(--blue-bg); border: 1px solid var(--blue-border); }
+.scan-badge-notif { color: var(--green); background: var(--green-bg); min-width: 18px; }
+
+.scan-delta { font-weight: 600; }
+.scan-delta-up { color: var(--green); }
+.scan-delta-down { color: var(--red); }
+.scan-delta-zero { color: var(--text-3); }
+.scan-method-dash { color: var(--text-3); }
+.scan-log-empty { text-align: center; color: var(--text-3); padding: 16px 8px; }
+
 /* ───── Non-Tennis Availability ───── */
 .other-availability {
     margin-top: 24px; border-radius: var(--radius-md);
@@ -396,6 +439,8 @@ details[open] > .other-heading .chevron { transform: rotate(180deg); }
 
     .summary-count { font-size: 36px; }
     .summary { padding: 20px 0 16px; }
+
+    .scan-log-table { min-width: 580px; }
 }
 
 /* Tiny screens */

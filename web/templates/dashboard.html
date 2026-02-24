@@ -142,6 +142,85 @@
 
 </div>
 
+<!-- Scan Log Table -->
+<div class="scan-log">
+    <details class="feed-section" open>
+        <summary class="feed-heading">
+            <span>Scan Log</span>
+            <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+        </summary>
+        <div class="scan-log-wrap">
+            <table class="scan-log-table">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Status</th>
+                        <th>Method</th>
+                        <th class="num">Slots</th>
+                        <th class="num">Opened</th>
+                        <th class="num">Closed</th>
+                        <th class="num">Notified</th>
+                        <th class="num">Duration</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for scan in scan_log %}
+                    <tr class="{{ 'scan-row-err' if not scan.success }}">
+                        <td class="scan-time-col">{{ scan.scan_time }}</td>
+                        <td>
+                            {% if scan.success %}
+                                <span class="scan-badge scan-badge-ok">OK</span>
+                            {% else %}
+                                <span class="scan-badge scan-badge-err" title="{{ scan.error_message or '' }}">FAIL</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if scan.scan_method == 'api_poll' %}
+                                <span class="scan-badge scan-badge-api">API</span>
+                            {% elif scan.scan_method %}
+                                <span class="scan-badge scan-badge-pw">PW</span>
+                            {% else %}
+                                <span class="scan-method-dash">&mdash;</span>
+                            {% endif %}
+                        </td>
+                        <td class="num">{{ scan.slots_found }}</td>
+                        <td class="num">
+                            {% if scan.slots_opened > 0 %}
+                                <span class="scan-delta scan-delta-up">+{{ scan.slots_opened }}</span>
+                            {% else %}
+                                <span class="scan-delta-zero">0</span>
+                            {% endif %}
+                        </td>
+                        <td class="num">
+                            {% if scan.slots_closed > 0 %}
+                                <span class="scan-delta scan-delta-down">-{{ scan.slots_closed }}</span>
+                            {% else %}
+                                <span class="scan-delta-zero">0</span>
+                            {% endif %}
+                        </td>
+                        <td class="num">
+                            {% if scan.notifications_sent > 0 %}
+                                <span class="scan-badge scan-badge-notif">{{ scan.notifications_sent }}</span>
+                            {% else %}
+                                <span class="scan-delta-zero">&mdash;</span>
+                            {% endif %}
+                        </td>
+                        <td class="num">{{ "%.1f"|format(scan.duration_seconds or 0) }}s</td>
+                    </tr>
+                    {% endfor %}
+                    {% if not scan_log %}
+                    <tr>
+                        <td colspan="8" class="scan-log-empty">No scans recorded yet</td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </details>
+</div>
+
 <!-- Footer -->
 <div class="page-footer">
     <span>McFetridge Sports Center</span>

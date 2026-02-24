@@ -241,6 +241,36 @@ async def get_slot_events(limit: int = 100) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+async def get_scan_log(limit: int = 50) -> list[dict]:
+    """Get detailed scan log with slot changes and notification status."""
+    async with aiosqlite.connect(_db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("""
+            SELECT
+                sr.id,
+                sr.scan_time,
+                sr.success,
+                sr.error_message,
+                sr.slots_found,
+                sr.duration_seconds,
+                COALESCE(SUM(CASE WHEN se.event_type = 'opened' THEN 1 ELSE 0 END), 0) AS slots_opened,
+                COALESCE(SUM(CASE WHEN se.event_type = 'closed' THEN 1 ELSE 0 END), 0) AS slots_closed,
+                (SELECT se2.scan_method FROM slot_events se2
+                 WHERE se2.scan_id = sr.id LIMIT 1) AS scan_method,
+                (SELECT COUNT(*) FROM notifications n
+                 WHERE n.sent_time BETWEEN sr.scan_time
+                 AND datetime(sr.scan_time, '+30 seconds')
+                 AND n.success = 1) AS notifications_sent
+            FROM scan_results sr
+            LEFT JOIN slot_events se ON se.scan_id = sr.id
+            GROUP BY sr.id
+            ORDER BY sr.id DESC
+            LIMIT ?
+        """, (limit,))
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
 async def get_recent_scans(limit: int = 20) -> list[dict]:
     async with aiosqlite.connect(_db_path) as db:
         db.row_factory = aiosqlite.Row

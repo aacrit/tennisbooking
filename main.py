@@ -17,7 +17,6 @@ from apscheduler.triggers.cron import CronTrigger
 
 import db
 from config import Settings
-from notifications.whatsapp import send_whatsapp, format_slots_message
 from scraper.checker import AvailabilityChecker
 from scraper.api_poller import APIPoller
 from scraper.parser import filter_slots
@@ -40,9 +39,6 @@ _poll_lock = asyncio.Lock()
 
 # Module-level state for the API poller
 _api_poller: APIPoller | None = None
-
-# Notification cooldown: slot_key -> last notification timestamp
-_last_notification_time: dict[tuple, float] = {}
 
 
 async def run_full_scan() -> int:
@@ -81,15 +77,6 @@ async def run_full_scan() -> int:
             opened, closed = await db.update_current_slots(
                 current_set, scan_id, "playwright"
             )
-
-            # Notify only on prime-time slots (weekday 6PM+ or weekends)
-            prime_time_set = {
-                (s["date"], s["time"], s.get("court_name", ""))
-                for s in filtered if s.get("is_prime_time")
-            }
-            prime_opened = opened & prime_time_set
-            if prime_opened:
-                await _notify_opened_slots(prime_opened)
 
             # Refresh API context for the lightweight poller
             if settings.api_poll_enabled:
@@ -159,15 +146,6 @@ async def run_api_poll() -> int:
                 current_set, scan_id, "api_poll"
             )
 
-            # Notify only on prime-time slots (weekday 6PM+ or weekends)
-            prime_time_set = {
-                (s["date"], s["time"], s.get("court_name", ""))
-                for s in filtered if s.get("is_prime_time")
-            }
-            prime_opened = opened & prime_time_set
-            if prime_opened:
-                await _notify_opened_slots(prime_opened)
-
             if filtered or opened or closed:
                 logger.info(
                     "DIAGNOSTIC: api_poll filtered=%d opened=%d closed=%d duration=%.2fs",
@@ -181,45 +159,6 @@ async def run_api_poll() -> int:
         except Exception as e:
             logger.warning("API poll failed: %s", e)
             return 0
-
-
-async def _notify_opened_slots(opened: set[tuple]):
-    """Send WhatsApp notification for newly opened slots with cooldown."""
-    now = _time.time()
-    now_ct = datetime.now(CT).strftime("%Y-%m-%d %H:%M:%S CST")
-
-    # Filter out recently notified slots (cooldown)
-    slots_to_notify = []
-    for d, t, c in sorted(opened):
-        key = (d, t, c)
-        last_notified = _last_notification_time.get(key, 0)
-        if now - last_notified > settings.notify_cooldown_seconds:
-            slots_to_notify.append({
-                "date": d, "time": t, "court_name": c, "detected_at": now_ct,
-            })
-            _last_notification_time[key] = now
-
-    if not slots_to_notify:
-        return
-
-    logger.info("Notifying about %d new slots via WhatsApp", len(slots_to_notify))
-
-    instance_id = settings.green_api_instance_id
-    api_token = settings.green_api_token
-    chat_ids = settings.whatsapp_chat_ids
-
-    if instance_id and api_token and chat_ids:
-        msg = format_slots_message(slots_to_notify)
-        for chat_id in chat_ids:
-            success = send_whatsapp(instance_id, api_token, chat_id, msg)
-            await db.record_notification(
-                "whatsapp", chat_id, slots_to_notify, success,
-            )
-    else:
-        logger.warning(
-            "WhatsApp not configured (missing GREEN_API_INSTANCE_ID / "
-            "GREEN_API_TOKEN / WHATSAPP_CHAT_ID)"
-        )
 
 
 async def _burst_poll_loop():
@@ -348,18 +287,6 @@ async def lifespan(app):
         except Exception as e:
             logger.exception("STARTUP SCAN CRASHED: %s", e)
     asyncio.create_task(_startup_scan())
-
-    # Log WhatsApp configuration status
-    chat_ids = settings.whatsapp_chat_ids
-    wa_configured = bool(
-        settings.green_api_instance_id and
-        settings.green_api_token and
-        chat_ids
-    )
-    logger.info(
-        "WhatsApp notifications: %s",
-        f"CONFIGURED ({len(chat_ids)} recipient{'s' if len(chat_ids) != 1 else ''})" if wa_configured else "NOT CONFIGURED",
-    )
 
     yield
 
